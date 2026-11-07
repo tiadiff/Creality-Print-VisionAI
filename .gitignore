@@ -1,0 +1,23 @@
+# Python virtual environments & bytecode
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs & temporary runtime files
+*.log
+service.log
+service_err.log
+architecture.html
+
+# Distribution & release packages
+dist/
+build/
+*.zip
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
