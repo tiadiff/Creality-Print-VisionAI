@@ -2287,10 +2287,8 @@
                 color: var(--primary-card-right-value-text-color, #FFFFFF) !important;
                 box-sizing: border-box !important;
                 white-space: nowrap !important;
-                overflow: hidden !important;
-                text-overflow: ellipsis !important;
                 min-width: 0 !important;
-                max-width: 58% !important;
+                max-width: 100% !important;
                 flex: 0 1 auto !important;
             }
             .agy-tel-badge-dot {
@@ -2304,6 +2302,8 @@
                 overflow: hidden !important;
                 text-overflow: ellipsis !important;
                 white-space: nowrap !important;
+                min-width: 0 !important;
+                flex: 1 1 auto !important;
             }
             .agy-tel-speed-val {
                 display: inline-flex !important;

@@ -595,23 +595,53 @@ class CronoPrintLauncher:
         if not target_path or not os.path.isfile(target_path):
             return False
         abs_target = os.path.abspath(target_path)
-        # Search for modern browsers on Windows to bypass broken IE association
+
+        # 1. First probe Windows UserChoice for default browser (e.g. Opera GX, Chrome, Edge)
+        if os.name == "nt":
+            import winreg
+
+            for reg_path in [
+                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice",
+                r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.html\UserChoice",
+            ]:
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path) as k:
+                        prog_id, _ = winreg.QueryValueEx(k, "ProgId")
+                        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command") as ck:
+                            raw_cmd, _ = winreg.QueryValueEx(ck, "")
+                            exe = raw_cmd.split('"')[1] if '"' in raw_cmd else raw_cmd.split()[0]
+                            if os.path.isfile(exe):
+                                subprocess.Popen([exe, abs_target])
+                                return True
+                except Exception:
+                    pass
+
+        # 2. Search for common modern browser executable locations
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+
         browser_candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Mozilla Firefox\firefox.exe",
-            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            os.path.join(local_app, r"Programs\Opera GX\opera.exe"),
+            os.path.join(local_app, r"Programs\Opera\launcher.exe"),
+            os.path.join(prog_files, r"Google\Chrome\Application\chrome.exe"),
+            os.path.join(prog_files_x86, r"Google\Chrome\Application\chrome.exe"),
+            os.path.join(prog_files, r"Microsoft\Edge\Application\msedge.exe"),
+            os.path.join(prog_files_x86, r"Microsoft\Edge\Application\msedge.exe"),
+            os.path.join(prog_files, r"Mozilla Firefox\firefox.exe"),
+            os.path.join(prog_files, r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+            os.path.join(local_app, r"BraveSoftware\Brave-Browser\Application\brave.exe"),
         ]
         for b in browser_candidates:
-            if os.path.isfile(b):
+            if b and os.path.isfile(b):
                 try:
                     subprocess.Popen([b, abs_target])
                     return True
                 except Exception:
                     pass
-        # Try powershell Start-Process
+
+        # 3. Fallbacks: powershell Start-Process, os.startfile, webbrowser
         try:
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", f"Start-Process '{abs_target}'"],
