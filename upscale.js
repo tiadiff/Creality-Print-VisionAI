@@ -1313,17 +1313,16 @@
     function positionAIPanel() {
         if (!uiContainer) return;
         const panel = uiContainer.querySelector("#aiPanel");
-        const badge = uiContainer.querySelector("#aiBadge");
-        if (!panel || !badge || !panel.classList.contains("open")) return;
-        const r = badge.getBoundingClientRect();
-        const rStr = (stringingBadgeEl && stringingBadgeEl.offsetParent !== null) ? stringingBadgeEl.getBoundingClientRect() : null;
-        const bottomMax = rStr ? Math.max(r.bottom, rStr.bottom) : r.bottom;
-        const top = Math.max(8, Math.round(bottomMax + 8));
-        const right = Math.max(8, Math.round(window.innerWidth - r.right));
-        const maxW = Math.min(650, Math.max(320, window.innerWidth - 24));
+        const uBadge = uiContainer.querySelector("#aiUnifiedBadge") || uiContainer.querySelector("#aiBadge");
+        if (!panel || !uBadge || !panel.classList.contains("open")) return;
+        const r = uBadge.getBoundingClientRect();
+        const top = Math.max(8, Math.round(r.bottom + 8));
+        const left = Math.max(8, Math.round(r.left));
+        const maxW = Math.min(650, Math.max(320, window.innerWidth - left - 16));
         panel.style.position = "fixed";
         panel.style.top = `${top}px`;
-        panel.style.right = `${right}px`;
+        panel.style.left = `${left}px`;
+        panel.style.right = "auto";
         panel.style.width = `${maxW}px`;
         panel.style.zIndex = "99999";
         panel.style.maxHeight = `${Math.max(220, window.innerHeight - top - 16)}px`;
@@ -1349,7 +1348,7 @@
 
         uiContainer = document.createElement("div");
         uiContainer.id = "crealityUpscaleUI";
-        uiContainer.style.cssText = `position:absolute;top:10px;right:12px;z-index:999;font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif;font-size:12px;user-select:none;`;
+        uiContainer.style.cssText = `position:absolute;top:10px;left:12px;z-index:999;font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif;font-size:12px;user-select:none;`;
 
         const sel = (v, cur) => (v === cur ? "selected" : "");
         const pct = (v) => Math.round(v * 100);
@@ -1362,15 +1361,74 @@
         uiContainer.innerHTML = `
             <style>
                 #crealityUpscaleUI, #crealityUpscaleUI * { box-sizing: border-box; }
-                #aiBadge{display:inline-flex;align-items:center;gap:8px;padding:6px 13px;background:rgba(24,24,26,.88);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.12);border-radius:8px;color:#e8e8ea;cursor:pointer;font-weight:500;letter-spacing:.2px;box-shadow:0 2px 10px rgba(0,0,0,.35);transition:background .15s,border-color .15s}
-                #aiBadge:hover{background:rgba(36,36,39,.94);border-color:rgba(255,255,255,.24)}
-                #aiBadge .dot{width:6px;height:6px;border-radius:50%;background:#e8e8ea}
-                #aiBadge.offline .dot{background:transparent;border:1px solid #8e8e93}
-                #aiBadge.offline{color:#a1a1a6}
-                #aiBadge.disabled .dot{background:transparent;border:1px solid #636366}
-                #aiBadge.disabled{color:#8e8e93}
-                #aiPanel{display:none;position:absolute;top:38px;right:0;width:650px;max-width:calc(100vw - 24px);background:rgba(24,24,26,.97);backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:16px 18px;color:#e8e8ea;box-shadow:0 14px 36px rgba(0,0,0,.55);max-height:85vh;overflow-y:auto}
-                #aiPanel.open{display:block}
+                #aiUnifiedBadge {
+                    display: inline-flex;
+                    flex-direction: column;
+                    background: rgba(24,24,26,.88);
+                    backdrop-filter: blur(12px);
+                    border: 1px solid rgba(255,255,255,.12);
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,.35);
+                    overflow: hidden;
+                    user-select: none;
+                    transition: background .15s, border-color .15s;
+                }
+                #aiUnifiedBadge:hover {
+                    background: rgba(36,36,39,.94);
+                    border-color: rgba(255,255,255,.24);
+                }
+                #aiBadge {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 6px 13px;
+                    color: #e8e8ea;
+                    cursor: pointer;
+                    font-weight: 500;
+                    letter-spacing: .2px;
+                    background: transparent;
+                    transition: background .15s;
+                }
+                #aiBadge:hover { background: rgba(255,255,255,.05); }
+                #aiBadge .dot { width: 6px; height: 6px; border-radius: 50%; background: #e8e8ea; }
+                #aiBadge.offline .dot { background: transparent; border: 1px solid #8e8e93; }
+                #aiBadge.offline { color: #a1a1a6; }
+                #aiBadge.disabled .dot { background: transparent; border: 1px solid #636366; }
+                #aiBadge.disabled { color: #8e8e93; }
+                .agy-badge-divider {
+                    height: 1px;
+                    background: rgba(255,255,255,.08);
+                    margin: 0;
+                }
+                .agy-str-badge {
+                    position: relative;
+                    overflow: hidden;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 7px;
+                    padding: 6px 13px;
+                    color: #e8e8ea;
+                    cursor: pointer;
+                    font-size: 12px;
+                    font-weight: 500;
+                    background: transparent;
+                    transition: background .15s;
+                }
+                .agy-str-badge:hover { background: rgba(255,255,255,.05); }
+                .agy-str-dot { width: 6px; height: 6px; border-radius: 50%; background: #17CC5F; flex: none; }
+                .agy-str-badge.calib .agy-str-dot { background: #38BDF8; }
+                .agy-str-badge.warn { color: #FDE68A; }
+                .agy-str-badge.warn .agy-str-dot { background: #F59E0B; }
+                .agy-str-badge.danger { background: rgba(239,68,68,.18); color: #FEE2E2; }
+                .agy-str-badge.danger .agy-str-dot { background: #EF4444; }
+                .agy-str-badge.muted { color: #a1a1a6; }
+                .agy-str-badge.muted .agy-str-dot { background: transparent; border: 1px solid #8e8e93; }
+                .agy-str-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255,255,255,.06); }
+                .agy-str-bar-fill { height: 100%; width: 0%; background: #F59E0B; transition: width .25s ease; }
+                .agy-str-badge.danger .agy-str-bar-fill { background: #EF4444; }
+
+                #aiPanel { display: none; position: fixed; top: 88px; left: 12px; width: 650px; max-width: calc(100vw - 24px); background: rgba(24,24,26,.97); backdrop-filter: blur(18px); border: 1px solid rgba(255,255,255,.10); border-radius: 12px; padding: 16px 18px; color: #e8e8ea; box-shadow: 0 14px 36px rgba(0,0,0,.55); max-height: 85vh; overflow-y: auto; z-index: 99999; }
+                #aiPanel.open { display: block; }
                 #aiPanel::-webkit-scrollbar{width:4px}
                 #aiPanel::-webkit-scrollbar-thumb{background:#3a3a3d;border-radius:4px}
                 .ai-grid{display:grid;grid-template-columns:1.02fr .98fr;gap:16px;align-items:start}
@@ -1424,23 +1482,23 @@
                 .agy-srv-err{display:none;margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#FCA5A5;font-size:10px;line-height:1.35;word-break:break-word}
                 .agy-srv-logs{display:none;margin-top:8px;padding:7px 8px;border-radius:6px;background:#111113;border:1px solid rgba(255,255,255,.08);color:#a1a1aa;font-family:Consolas,monospace;font-size:9.5px;line-height:1.35;max-height:110px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
 
-                /* Stringing AI badge (stacked directly below upscaler badge in top-right) & camera alert card */
-                #agyStringingHost{position:absolute;top:50px;right:12px;z-index:998;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif}
-                .agy-str-badge{pointer-events:auto;position:relative;overflow:hidden;display:inline-flex;align-items:center;gap:7px;padding:6px 12px;background:rgba(24,24,26,.88);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.12);border-radius:8px;color:#e8e8ea;cursor:pointer;font-size:12px;font-weight:500;box-shadow:0 2px 10px rgba(0,0,0,.35);width:fit-content}
-                .agy-str-badge:hover{background:rgba(36,36,39,.94);border-color:rgba(255,255,255,.24)}
-                .agy-str-dot{width:7px;height:7px;border-radius:50%;background:#17CC5F;flex:none}
-                .agy-str-badge.calib .agy-str-dot{background:#38BDF8}
-                .agy-str-badge.warn{border-color:rgba(245,158,11,.55);color:#FDE68A}
-                .agy-str-badge.warn .agy-str-dot{background:#F59E0B}
-                .agy-str-badge.danger{border-color:rgba(239,68,68,.75);background:rgba(69,10,10,.92);color:#FEE2E2}
-                .agy-str-badge.danger .agy-str-dot{background:#EF4444}
-                .agy-str-badge.muted{color:#a1a1a6}
-                .agy-str-badge.muted .agy-str-dot{background:transparent;border:1px solid #8e8e93}
-                .agy-str-bar{position:absolute;left:0;right:0;bottom:0;height:2px;background:rgba(255,255,255,.06)}
-                .agy-str-bar-fill{height:100%;width:0%;background:#F59E0B;transition:width .25s ease}
-                .agy-str-badge.danger .agy-str-bar-fill{background:#EF4444}
-
-                #agyStringingAlert{display:none;pointer-events:auto;width:340px;max-width:calc(100vw - 48px);background:rgba(24,20,22,.96);backdrop-filter:blur(16px);border:1px solid rgba(239,68,68,.65);border-radius:10px;padding:12px;color:#f4f4f6;box-shadow:0 12px 32px rgba(0,0,0,.6)}
+                /* Camera alert card */
+                #agyStringingAlert {
+                    display: none;
+                    position: absolute;
+                    top: 86px;
+                    left: 12px;
+                    z-index: 998;
+                    width: 340px;
+                    max-width: calc(100vw - 48px);
+                    background: rgba(24,20,22,.96);
+                    backdrop-filter: blur(16px);
+                    border: 1px solid rgba(239,68,68,.65);
+                    border-radius: 10px;
+                    padding: 12px;
+                    color: #f4f4f6;
+                    box-shadow: 0 12px 32px rgba(0,0,0,.6);
+                }
                 .agy-str-alert-title{font-size:12.5px;font-weight:700;color:#FCA5A5;margin-bottom:4px}
                 .agy-str-alert-desc{font-size:11px;color:#d4d4d8;margin-bottom:8px;line-height:1.35}
                 .agy-str-alert-img{width:100%;max-height:145px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,.1);margin-bottom:8px;display:none}
@@ -1449,7 +1507,15 @@
                 .agy-str-alert-actions button.primary{background:#17CC5F;border-color:#17CC5F;color:#0b1810}
             </style>
 
-            <div id="aiBadge"><span class="dot"></span><span id="badgeText">AI</span></div>
+            <div id="aiUnifiedBadge">
+                <div id="aiBadge" title="Clicca per aprire le impostazioni AI"><span class="dot"></span><span id="badgeText">AI</span></div>
+                <div class="agy-badge-divider"></div>
+                <div class="agy-str-badge muted" title="Clicca per impostazioni AI Stringing">
+                    <span class="agy-str-dot"></span>
+                    <span class="agy-str-txt">Stringing AI · Attiva</span>
+                    <div class="agy-str-bar"><div class="agy-str-bar-fill"></div></div>
+                </div>
+            </div>
 
             <div id="aiPanel">
                 <div class="ai-head">
@@ -1622,45 +1688,41 @@
         `;
         parent.appendChild(uiContainer);
 
-        const oldStrHost = parent.querySelector("#agyStringingHost");
-        if (oldStrHost) oldStrHost.remove();
-        const strHost = document.createElement("div");
-        strHost.id = "agyStringingHost";
-        strHost.innerHTML = `
-            <div class="agy-str-badge muted" title="Clicca per impostazioni AI Stringing">
-                <span class="agy-str-dot"></span>
-                <span class="agy-str-txt">Stringing AI · Attiva</span>
-                <div class="agy-str-bar"><div class="agy-str-bar-fill"></div></div>
+        const oldAlert = parent.querySelector("#agyStringingAlert");
+        if (oldAlert) oldAlert.remove();
+        const alertEl = document.createElement("div");
+        alertEl.id = "agyStringingAlert";
+        alertEl.innerHTML = `
+            <div class="agy-str-alert-title"></div>
+            <div class="agy-str-alert-desc"></div>
+            <div id="agyAlertRegionsWrap" style="margin:6px 0;max-height:100px;overflow-y:auto;display:none;">
+                <div style="font-size:11px;color:#cbd5e1;margin-bottom:4px;font-weight:600">Zone segnalate (ignora falso allarme):</div>
+                <div id="agyAlertRegionsList" style="display:flex;flex-direction:column;gap:4px"></div>
             </div>
-            <div id="agyStringingAlert">
-                <div class="agy-str-alert-title"></div>
-                <div class="agy-str-alert-desc"></div>
-                <div id="agyAlertRegionsWrap" style="margin:6px 0;max-height:100px;overflow-y:auto;display:none;">
-                    <div style="font-size:11px;color:#cbd5e1;margin-bottom:4px;font-weight:600">Zone segnalate (ignora falso allarme):</div>
-                    <div id="agyAlertRegionsList" style="display:flex;flex-direction:column;gap:4px"></div>
-                </div>
-                <div class="agy-str-alert-actions">
-                    <button type="button" class="primary" id="btnAlertAck">Segna tutti letti &amp; Continua</button>
-                    <button type="button" id="btnAlertReset">Ricalibra scena</button>
-                </div>
+            <div class="agy-str-alert-actions">
+                <button type="button" class="primary" id="btnAlertAck">Segna tutti letti &amp; Continua</button>
+                <button type="button" id="btnAlertReset">Ricalibra scena</button>
             </div>
         `;
-        parent.appendChild(strHost);
-        stringingBadgeEl = strHost.querySelector(".agy-str-badge");
-        stringingAlertEl = strHost.querySelector("#agyStringingAlert");
+        parent.appendChild(alertEl);
+
+        const oldStrHost = parent.querySelector("#agyStringingHost");
+        if (oldStrHost) oldStrHost.remove();
 
         const q = (id) => uiContainer.querySelector(id);
         const badge = q("#aiBadge"), panel = q("#aiPanel"), badgeText = q("#badgeText");
+        stringingBadgeEl = uiContainer.querySelector(".agy-str-badge");
+        stringingAlertEl = alertEl;
 
         stringingBadgeEl.addEventListener("click", (e) => {
             e.stopPropagation();
             openAIPanel(false);
         });
-        strHost.querySelector("#btnAlertAck").addEventListener("click", (e) => {
+        alertEl.querySelector("#btnAlertAck").addEventListener("click", (e) => {
             e.stopPropagation();
             sendStringingAction("ack", "stringing_ack");
         });
-        strHost.querySelector("#btnAlertReset").addEventListener("click", (e) => {
+        alertEl.querySelector("#btnAlertReset").addEventListener("click", (e) => {
             e.stopPropagation();
             sendStringingAction("reset", "stringing_reset");
         });
@@ -1705,7 +1767,7 @@
         document.addEventListener("click", (e) => {
             if (!uiContainer) return;
             const t = e.target;
-            if (!uiContainer.contains(t) && !(t && t.closest && (t.closest("#agyStringingHost") || t.closest(".agy-tel-src")))) {
+            if (!uiContainer.contains(t) && !(t && t.closest && (t.closest("#agyStringingAlert") || t.closest(".agy-tel-src")))) {
                 panel.classList.remove("open");
             }
         });
