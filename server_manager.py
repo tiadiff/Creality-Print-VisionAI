@@ -6,6 +6,16 @@ restart, and view logs for the local AI server (`:8088`, either Full GPU
 Real-ESRGAN + Stringing AI or Standalone CPU Telemetry + Stringing AI) directly
 from Chromium without opening manual terminals.
 
+Lifecycle (default, disable with `--no-lifecycle`):
+  - The supervisor is started at Windows logon but stays DORMANT (no listening
+    socket, no printer traffic) while Creality Print is closed.
+  - When `CrealityPrint.exe` starts, the control port `:8089` is opened and the
+    AI server `:8088` is started automatically (if enabled in settings).
+  - When Creality Print closes, the AI server (and its child interpreter) is
+    stopped, the control port is closed and the supervisor returns dormant.
+
+Also launches the integrated CronoPrint console (`CronoPrint/`) silently.
+
 Security:
   - Binds strictly to 127.0.0.1 (never exposed to LAN).
   - Enforces localhost/loopback Origin pinning on mutating endpoints.
@@ -32,6 +42,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
+import cp_lifecycle
+
 CTRL_HOST = "127.0.0.1"
 CTRL_PORT = 8089
 AI_HOST = "127.0.0.1"
@@ -43,6 +55,14 @@ DEFAULT_LOG_DIR = os.path.join(
     "CrealityVisionAI",
     "logs",
 )
+SETTINGS_PATH = os.path.join(os.path.dirname(DEFAULT_LOG_DIR), "supervisor_settings.json")
+SUPERVISOR_MUTEX = "Local\\CrealityVisionAISupervisor"
+
+CRONOPRINT_DIR = os.path.join(REPO_DIR, "CronoPrint")
+CRONOPRINT_BAT = os.path.join(CRONOPRINT_DIR, "Avvia_SparkX_Console.bat")
+CRONOPRINT_PROJECT = os.path.join(CRONOPRINT_DIR, "SparkXPrintConsole")
+CRONOPRINT_EXE = os.path.join(CRONOPRINT_PROJECT, "bin", "Release", "net8.0-windows", "SparkXPrintConsole.exe")
+CRONOPRINT_PROC = "sparkxprintconsole.exe"
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(127\.0\.0\.1|localhost)(:\d{1,5})?$", re.IGNORECASE)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
@@ -399,8 +419,15 @@ class AIServerSupervisor:
 
             return 200, self.get_status()
 
-    def stop(self, timeout: float = 3.5) -> Tuple[int, Dict[str, Any]]:
+    def stop(self, timeout: float = 3.5, force_external: bool = False) -> Tuple[int, Dict[str, Any]]:
         with self._op_lock:
+            external_pid: Optional[int] = None
+            if force_external:
+                live = self.probe_ai_server(timeout=0.5)
+                try:
+                    external_pid = int((live or {}).get("pid") or 0) or None
+                except Exception:
+                    external_pid = None
             # 1. Request clean cooperative HTTP shutdown first (works for both managed and external .bat servers!)
             try:
                 req = urllib.request.Request(
@@ -424,19 +451,31 @@ class AIServerSupervisor:
                     break
                 time.sleep(0.12)
 
-            # 2. Force-terminate managed process if still alive after graceful wait
+            # 2. Force-terminate managed process tree if still alive after graceful wait.
+            #    (`.venv\Scripts\python.exe` is a launcher: the real interpreter is a child
+            #    process, so terminating only the launcher would leave an orphan behind.)
             with self._state_lock:
                 proc = self.proc
             if proc is not None and proc.poll() is None:
+                cp_lifecycle.kill_process_tree(proc.pid)
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=1.2)
+                    proc.wait(timeout=1.5)
                 except Exception:
                     try:
                         proc.kill()
                         proc.wait(timeout=1.0)
                     except Exception:
                         pass
+            elif proc is not None:
+                # Launcher already exited: make sure no child interpreter survived it.
+                for child in cp_lifecycle.descendant_pids(proc.pid):
+                    cp_lifecycle.kill_process_tree(child)
+
+            # 3. Lifecycle shutdown: an external/orphaned :8088 server that ignored the
+            #    cooperative request is terminated by the PID it reported in /status.
+            if force_external and external_pid and external_pid != os.getpid():
+                if self.probe_ai_server(timeout=0.3) is not None:
+                    cp_lifecycle.kill_process_tree(external_pid)
 
             with self._state_lock:
                 if self.proc is not None and self.proc.poll() is not None:
@@ -467,12 +506,211 @@ class AIServerSupervisor:
             return []
 
 
+class SupervisorSettings:
+    """Small persisted preference store (`%LOCALAPPDATA%\\CrealityVisionAI\\supervisor_settings.json`)."""
+
+    DEFAULTS: Dict[str, Any] = {
+        "autostart_with_creality": True,
+        "autostart_mode": "auto",
+    }
+
+    def __init__(self, path: str = SETTINGS_PATH) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self.data: Dict[str, Any] = dict(self.DEFAULTS)
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                for k in self.DEFAULTS:
+                    if k in loaded:
+                        self.data[k] = loaded[k]
+        except Exception:
+            pass
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self.data)
+
+    def update(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            if "autostart_with_creality" in patch:
+                self.data["autostart_with_creality"] = bool(patch["autostart_with_creality"])
+            if "autostart_mode" in patch:
+                m = str(patch["autostart_mode"] or "auto").strip().lower()
+                self.data["autostart_mode"] = m if m in ("auto", "full_gpu", "standalone_cpu") else "auto"
+            try:
+                os.makedirs(os.path.dirname(self.path), exist_ok=True)
+                with open(self.path, "w", encoding="utf-8") as f:
+                    json.dump(self.data, f, indent=2)
+            except Exception:
+                pass
+            return dict(self.data)
+
+
+class CronoPrintLauncher:
+    """Launches the integrated CronoPrint console silently (hidden console, no terminal window)."""
+
+    def __init__(self, bat_path: str = CRONOPRINT_BAT, exe_path: str = CRONOPRINT_EXE) -> None:
+        self.bat_path = bat_path
+        self.exe_path = exe_path
+        self._lock = threading.Lock()
+        self.phase = "idle"  # idle | building | launching | error
+        self.last_error = ""
+        self.last_launch_at = 0.0
+
+    def _running_pids(self) -> List[int]:
+        return sorted(cp_lifecycle.find_pids([CRONOPRINT_PROC]))
+
+    def status(self) -> Dict[str, Any]:
+        pids = self._running_pids()
+        with self._lock:
+            phase = self.phase
+            if phase == "launching" and (pids or (time.time() - self.last_launch_at) > 90.0):
+                self.phase = phase = "idle"
+            return {
+                "ok": True,
+                "installed": os.path.isfile(self.bat_path),
+                "built": os.path.isfile(self.exe_path),
+                "running": bool(pids),
+                "pids": pids,
+                "phase": phase,
+                "last_error": self.last_error,
+                "bat_path": self.bat_path,
+            }
+
+    @staticmethod
+    def _focus_pids(pids: List[int]) -> bool:
+        """Restore & bring the CronoPrint main window to the foreground (best effort)."""
+        if os.name != "nt" or not pids:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            wanted = set(int(p) for p in pids)
+            found: List[int] = []
+
+            @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lparam):
+                if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) <= 0:
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if int(pid.value) in wanted:
+                    found.append(hwnd)
+                    return False
+                return True
+
+            user32.EnumWindows(_enum, 0)
+            if not found:
+                return False
+            hwnd = found[0]
+            SW_RESTORE = 9
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+            return True
+        except Exception:
+            return False
+
+    def _build_then_launch(self) -> None:
+        dotnet = shutil.which("dotnet")
+        if not dotnet:
+            with self._lock:
+                self.phase = "error"
+                self.last_error = "CronoPrint non compilato e .NET SDK non trovato (dotnet)."
+            return
+        try:
+            res = subprocess.run(
+                [dotnet, "build", CRONOPRINT_PROJECT, "-c", "Release", "-nologo", "-v", "q"],
+                cwd=CRONOPRINT_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=240,
+                creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            ok = res.returncode == 0 and os.path.isfile(self.exe_path)
+        except Exception as exc:
+            ok = False
+            with self._lock:
+                self.last_error = f"Compilazione CronoPrint fallita: {exc}"
+        if not ok:
+            with self._lock:
+                self.phase = "error"
+                if not self.last_error:
+                    self.last_error = "Compilazione CronoPrint fallita (dotnet build -c Release)."
+            return
+        self._spawn_bat()
+
+    def _spawn_bat(self) -> None:
+        try:
+            # stdin=DEVNULL makes any `pause` inside the batch return immediately, so a hidden
+            # console can never hang waiting for a keypress nobody can see.
+            subprocess.Popen(
+                ["cmd.exe", "/d", "/c", self.bat_path],
+                cwd=os.path.dirname(self.bat_path),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
+                close_fds=True,
+            )
+            with self._lock:
+                self.phase = "launching"
+                self.last_launch_at = time.time()
+                self.last_error = ""
+        except Exception as exc:
+            with self._lock:
+                self.phase = "error"
+                self.last_error = f"Impossibile avviare CronoPrint: {exc}"
+
+    def launch(self) -> Tuple[int, Dict[str, Any]]:
+        if not os.path.isfile(self.bat_path):
+            st = self.status()
+            st.update({"ok": False, "error": f"Launcher CronoPrint mancante: {self.bat_path}"})
+            return 404, st
+
+        pids = self._running_pids()
+        if pids:
+            focused = self._focus_pids(pids)
+            st = self.status()
+            st.update({"already_running": True, "focused": focused})
+            return 200, st
+
+        with self._lock:
+            if self.phase in ("building", "launching") and (time.time() - self.last_launch_at) < 45.0:
+                busy = True
+            else:
+                busy = False
+                self.last_error = ""
+                self.last_launch_at = time.time()
+                self.phase = "building" if not os.path.isfile(self.exe_path) else "launching"
+            phase = self.phase
+        if busy:
+            st = self.status()
+            st["busy"] = True
+            return 200, st
+
+        if phase == "building":
+            threading.Thread(target=self._build_then_launch, name="CronoPrintBuild", daemon=True).start()
+        else:
+            self._spawn_bat()
+        return 200, self.status()
+
+
 def create_supervisor_server(
     supervisor: Optional[AIServerSupervisor] = None,
     host: str = CTRL_HOST,
     port: int = CTRL_PORT,
+    cronoprint: Optional[CronoPrintLauncher] = None,
+    settings: Optional[SupervisorSettings] = None,
 ):
     sup = supervisor or AIServerSupervisor(ctrl_port=port)
+    crono = cronoprint or CronoPrintLauncher()
+    pref = settings or SupervisorSettings()
 
     class Handler(BaseHTTPRequestHandler):
         def _send_cors(self, origin: Optional[str]) -> None:
@@ -528,7 +766,14 @@ def create_supervisor_server(
             qs = urllib.parse.parse_qs(parsed.query)
             if parsed.path in ("/control/status", "/status"):
                 refresh = (qs.get("refresh") or ["0"])[0] in ("1", "true")
-                self._send_json(sup.get_status(refresh_caps=refresh), origin=origin)
+                st = sup.get_status(refresh_caps=refresh)
+                st["cronoprint"] = crono.status()
+                st["settings"] = pref.snapshot()
+                self._send_json(st, origin=origin)
+            elif parsed.path == "/control/cronoprint":
+                self._send_json(crono.status(), origin=origin)
+            elif parsed.path == "/control/settings":
+                self._send_json({"ok": True, "settings": pref.snapshot()}, origin=origin)
             elif parsed.path == "/control/logs":
                 try:
                     n = int((qs.get("lines") or ["35"])[0])
@@ -563,6 +808,12 @@ def create_supervisor_server(
             elif parsed.path == "/control/restart":
                 code, res = sup.restart(mode=mode)
                 self._send_json(res, status=code, origin=origin)
+            elif parsed.path == "/control/cronoprint/launch":
+                code, res = crono.launch()
+                self._send_json(res, status=code, origin=origin)
+            elif parsed.path == "/control/settings":
+                updated = pref.update(body)
+                self._send_json({"ok": True, "settings": updated}, origin=origin)
             else:
                 self._send_json({"ok": False, "error": "Not found"}, status=404, origin=origin)
 
@@ -613,6 +864,78 @@ def ensure_supervisor_running(host: str = CTRL_HOST, port: int = CTRL_PORT) -> b
     return False
 
 
+def run_lifecycle_daemon(
+    host: str = CTRL_HOST,
+    port: int = CTRL_PORT,
+    repo_dir: str = REPO_DIR,
+) -> None:
+    """
+    Standby daemon:
+      - Holds a single-instance mutex (`Local\\CrealityVisionAISupervisor`).
+      - Dormant while Creality Print is closed (0% CPU, no listening socket, no printer traffic).
+      - Opens :8089 and starts :8088 when `CrealityPrint.exe` appears.
+      - Stops :8088 and closes :8089 when Creality Print exits.
+    """
+    if not cp_lifecycle.acquire_single_instance(SUPERVISOR_MUTEX):
+        return
+
+    sup = AIServerSupervisor(repo_dir=repo_dir, ctrl_port=port)
+    crono = CronoPrintLauncher()
+    pref = SupervisorSettings()
+
+    stop_evt = threading.Event()
+    active_server: Optional[ThreadingHTTPServer] = None
+    server_thread: Optional[threading.Thread] = None
+    lock = threading.Lock()
+
+    def on_cp_open():
+        nonlocal active_server, server_thread
+        with lock:
+            if active_server is not None:
+                return
+            sup.inspect_capabilities(refresh=True)
+            srv = create_supervisor_server(supervisor=sup, host=host, port=port, cronoprint=crono, settings=pref)
+            active_server = srv
+            t = threading.Thread(target=srv.serve_forever, name="SupervisorHTTP", daemon=True)
+            server_thread = t
+            t.start()
+            cfg = pref.snapshot()
+            if cfg.get("autostart_with_creality", True):
+                sup.start(mode=str(cfg.get("autostart_mode") or "auto"))
+
+    def on_cp_close():
+        nonlocal active_server, server_thread
+        with lock:
+            srv = active_server
+            active_server = None
+            server_thread = None
+        # Shut down child AI server & any orphan processes immediately
+        sup.stop(timeout=2.5, force_external=True)
+        if srv is not None:
+            try:
+                srv.shutdown()
+                srv.server_close()
+            except Exception:
+                pass
+
+    watcher = cp_lifecycle.CrealityPrintWatcher(
+        on_open=on_cp_open,
+        on_close=on_cp_close,
+        interval=1.8,
+        close_grace=4.0,
+    )
+    watcher.start()
+
+    try:
+        while not stop_evt.is_set():
+            time.sleep(2.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watcher.stop()
+        on_cp_close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Creality Vision AI Local Server Supervisor (:8089)")
     parser.add_argument("--host", default=CTRL_HOST)
@@ -620,7 +943,15 @@ def main() -> int:
     parser.add_argument("--ensure-running", action="store_true", help="Start detached supervisor if offline and return")
     parser.add_argument("--status", action="store_true", help="Print live supervisor status JSON and exit")
     parser.add_argument("--stop-ai", action="store_true", help="Stop managed AI server via running supervisor")
+    parser.add_argument("--launch-cronoprint", action="store_true", help="Launch CronoPrint silently and exit")
+    parser.add_argument("--no-lifecycle", action="store_true", help="Run HTTP server continuously without Creality Print lifecycle")
     args = parser.parse_args()
+
+    if args.launch_cronoprint:
+        crono = CronoPrintLauncher()
+        code, res = crono.launch()
+        print(json.dumps(res, indent=2))
+        return 0 if code < 400 else 1
 
     if args.ensure_running:
         ok = ensure_supervisor_running(args.host, args.port)
@@ -651,9 +982,17 @@ def main() -> int:
     if probe_supervisor(args.host, args.port) is not None:
         return 0
 
+    if not args.no_lifecycle:
+        run_lifecycle_daemon(host=args.host, port=args.port, repo_dir=REPO_DIR)
+        return 0
+
     sup = AIServerSupervisor(repo_dir=REPO_DIR, ctrl_port=args.port)
     sup.inspect_capabilities(refresh=True)
-    srv = create_supervisor_server(supervisor=sup, host=args.host, port=args.port)
+    crono = CronoPrintLauncher()
+    pref = SupervisorSettings()
+    srv = create_supervisor_server(
+        supervisor=sup, host=args.host, port=args.port, cronoprint=crono, settings=pref
+    )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,1834 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SparkX i7 &bull; Console Telemetria Stampe</title>
+    <style>
+        :root {
+            --bg-base: #07090c;
+            --bg-surface: #0f1217;
+            --bg-elevated: #151921;
+            --bg-item: #12151c;
+            --bg-hover: #1a202a;
+            --bg-viewport: #090b0e;
+
+            --border-strong: #2c3342;
+            --border: #1e232d;
+            --border-faint: #151820;
+
+            /* Strict Emerald Palette */
+            --green: #10b981;
+            --green-dim: #059669;
+            --green-subtle: rgba(16, 185, 129, 0.09);
+            --green-border: rgba(16, 185, 129, 0.32);
+            --green-bright: #34d399;
+
+            --fg-white: #ffffff;
+            --fg-primary: #e2e8f0;
+            --fg-muted: #94a3b8;
+            --fg-faint: #64748b;
+
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--fg-primary);
+            font-family: var(--font-sans);
+            font-size: 15px;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            padding: 1.25rem 1.75rem 4rem;
+            user-select: none;
+        }
+
+        .console-root {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        /* Top Header */
+        .console-header {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.95rem 1.35rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .brand-cluster {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+        }
+
+        .brand-name {
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            color: var(--fg-white);
+        }
+
+        .conn-pill {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--green-bright);
+            background: var(--green-subtle);
+            border: 1px solid var(--green-border);
+            padding: 3px 10px;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+        }
+
+        .conn-pill.offline {
+            color: var(--fg-muted);
+            background: var(--bg-base);
+            border-color: var(--border);
+        }
+
+        .conn-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: var(--green);
+        }
+
+        .conn-dot.offline {
+            background-color: var(--fg-faint);
+        }
+
+        .telemetry-summary {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .stat-pill {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 6px 13px;
+            display: inline-flex;
+            align-items: baseline;
+            gap: 8px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-num {
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--fg-white);
+        }
+
+        .stat-num.green {
+            color: var(--green-bright);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+        }
+
+        .btn {
+            font-family: var(--font-sans);
+            font-size: 14px;
+            font-weight: 500;
+            padding: 6px 15px;
+            border-radius: 4px;
+            border: 1px solid var(--border-strong);
+            background: var(--bg-elevated);
+            color: var(--fg-primary);
+            cursor: pointer;
+            transition: all 0.15s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover {
+            background: var(--bg-hover);
+            border-color: var(--fg-muted);
+            color: var(--fg-white);
+        }
+
+        .btn-green {
+            background: var(--green-subtle);
+            color: var(--green-bright);
+            border-color: var(--green-border);
+        }
+
+        .btn-green:hover {
+            background: rgba(16, 185, 129, 0.2);
+            border-color: var(--green);
+            color: var(--fg-white);
+        }
+
+        /* LIVE TELEMETRY BANNER WITH INTEGRATED WEBCAM */
+        .live-banner {
+            display: none;
+            background: #0d1318;
+            border: 1px solid var(--green-border);
+            border-radius: 6px;
+            padding: 1rem 1.35rem;
+            margin-bottom: 1.25rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .live-banner::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: var(--green);
+        }
+
+        .live-layout {
+            display: grid;
+            grid-template-columns: 1fr auto 240px;
+            gap: 1.5rem;
+            align-items: center;
+        }
+
+        .live-badge {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 700;
+            background: var(--green-subtle);
+            color: var(--green-bright);
+            border: 1px solid var(--green);
+            padding: 4px 10px;
+            border-radius: 4px;
+            letter-spacing: 0.05em;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            margin-bottom: 0.5rem;
+        }
+
+        .live-pulse {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--green);
+            box-shadow: 0 0 10px var(--green);
+            animation: liveBlink 1.5s infinite;
+        }
+
+        @keyframes liveBlink {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
+
+        .live-info-title {
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--fg-white);
+            margin-bottom: 0.35rem;
+        }
+
+        .live-info-sub {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--fg-muted);
+            display: flex;
+            gap: 1.25rem;
+            flex-wrap: wrap;
+        }
+
+        .live-metrics-box {
+            display: flex;
+            gap: 1.5rem;
+            align-items: center;
+            font-family: var(--font-mono);
+            border-left: 1px solid var(--border);
+            padding-left: 1.25rem;
+        }
+
+        .live-temp-item {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .temp-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--fg-faint);
+            text-transform: uppercase;
+        }
+
+        .temp-val {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--fg-white);
+        }
+
+        /* WEBCAM PREVIEW CONTAINER */
+        .camera-preview-box {
+            width: 240px;
+            height: 135px;
+            background: #050608;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            overflow: hidden;
+            position: relative;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: border-color 0.15s ease;
+        }
+
+        .camera-preview-box:hover {
+            border-color: var(--green);
+        }
+
+        .camera-preview-box iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            pointer-events: none; /* Allows click on parent container */
+            transform: scale(1.02);
+        }
+
+        .camera-hover-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(9, 11, 14, 0.85);
+            padding: 4px 8px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--green-bright);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Operational Toolbar */
+        .action-toolbar {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.75rem 1.15rem;
+            margin-bottom: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .filter-tabs {
+            display: inline-flex;
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px;
+        }
+
+        .tab-item {
+            font-family: var(--font-sans);
+            font-size: 14px;
+            font-weight: 500;
+            padding: 6px 14px;
+            border-radius: 3px;
+            border: none;
+            background: transparent;
+            color: var(--fg-muted);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .tab-item:hover {
+            color: var(--fg-primary);
+        }
+
+        .tab-item.active {
+            background: var(--bg-elevated);
+            color: var(--fg-white);
+            font-weight: 600;
+        }
+
+        .tool-cluster {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            flex-wrap: wrap;
+        }
+
+        .search-input {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--fg-white);
+            font-family: var(--font-sans);
+            font-size: 14px;
+            padding: 6px 12px;
+            width: 250px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .search-input:focus {
+            border-color: var(--green);
+        }
+
+        .select-dark {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--fg-primary);
+            font-family: var(--font-sans);
+            font-size: 14px;
+            padding: 6px 10px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .select-dark:focus {
+            border-color: var(--green);
+        }
+
+        .rate-wrapper {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 5px 10px;
+            font-size: 13px;
+            color: var(--fg-muted);
+        }
+
+        .rate-input {
+            width: 46px;
+            background: transparent;
+            border: none;
+            color: var(--green-bright);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            text-align: right;
+            outline: none;
+        }
+
+        .view-group {
+            display: inline-flex;
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px;
+        }
+
+        .view-pill {
+            border: none;
+            background: transparent;
+            color: var(--fg-faint);
+            padding: 5px 9px;
+            border-radius: 3px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .view-pill.active {
+            background: var(--bg-elevated);
+            color: var(--fg-white);
+        }
+
+        /* VIEW 1: HORIZONTAL ROW FEED */
+        .feed-container {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .feed-row {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem 1.35rem;
+            display: grid;
+            grid-template-columns: 104px 1fr 240px 190px 230px;
+            align-items: center;
+            gap: 1.5rem;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .feed-row:hover {
+            background: var(--bg-elevated);
+            border-color: var(--border-strong);
+        }
+
+        .feed-thumb-box {
+            width: 104px;
+            height: 104px;
+            background: var(--bg-viewport);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            flex-shrink: 0;
+            position: relative;
+        }
+
+        .feed-thumb-img {
+            max-width: 92%;
+            max-height: 92%;
+            object-fit: contain;
+            filter: drop-shadow(0 3px 6px rgba(0,0,0,0.6));
+        }
+
+        .placeholder-svg {
+            width: 68px;
+            height: 68px;
+            opacity: 0.85;
+        }
+
+        .feed-col-primary {
+            min-width: 0;
+        }
+
+        .feed-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--fg-white);
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            letter-spacing: -0.01em;
+        }
+
+        .feed-file {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--fg-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 8px;
+        }
+
+        .feed-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+
+        /* CLARIFIED LABELS FOR NOZZLE, LAYER, INFILL (Reflecting uploaded image feedback) */
+        .tag-pill {
+            font-size: 13px;
+            font-family: var(--font-mono);
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            color: var(--fg-primary);
+            padding: 3px 9px;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .tag-pill strong {
+            color: var(--fg-muted);
+            font-weight: 600;
+            font-size: 12px;
+        }
+
+        .tag-pill.green {
+            color: var(--green-bright);
+            border-color: var(--green-border);
+            background: var(--green-subtle);
+        }
+
+        .tag-pill.highlight {
+            border-color: var(--border-strong);
+            background: var(--bg-elevated);
+            color: var(--fg-white);
+        }
+
+        .feed-col-specs {
+            border-left: 1px solid var(--border-faint);
+            border-right: 1px solid var(--border-faint);
+            padding: 0 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            font-size: 13px;
+        }
+
+        .spec-line {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .spec-label {
+            color: var(--fg-faint);
+            font-weight: 500;
+            font-size: 12px;
+        }
+
+        .spec-val {
+            font-family: var(--font-mono);
+            color: var(--fg-primary);
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .feed-col-metrics {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .metric-duration {
+            font-family: var(--font-mono);
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--fg-white);
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+        }
+
+        .metric-delta {
+            font-size: 12px;
+            color: var(--green-bright);
+            font-family: var(--font-sans);
+            font-weight: 600;
+        }
+
+        .metric-grams {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--fg-muted);
+        }
+
+        .metric-cost {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--green-bright);
+            margin-top: 2px;
+        }
+
+        .feed-col-status {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+        }
+
+        .status-badge {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            padding: 4px 9px;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .status-badge.completed {
+            color: var(--green-bright);
+            background: var(--green-subtle);
+            border: 1px solid var(--green-border);
+        }
+
+        .status-badge.cancelled {
+            color: var(--fg-faint);
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+        }
+
+        .status-badge.in_progress {
+            color: var(--green);
+            border: 1px solid var(--green);
+        }
+
+        /* EXTENDED ITALIAN DATE STYLE - LARGER AND HIGH-CONTRAST */
+        .feed-date {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--fg-white);
+            text-align: right;
+            line-height: 1.35;
+            letter-spacing: -0.01em;
+        }
+
+        .feed-job-id {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--fg-faint);
+        }
+
+        /* VIEW 2: GALLERY GRID */
+        .gallery-grid {
+            display: none;
+            grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+            gap: 1rem;
+        }
+
+        .gallery-item {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .gallery-item:hover {
+            background: var(--bg-elevated);
+            border-color: var(--border-strong);
+        }
+
+        .gallery-viewport {
+            height: 175px;
+            background: var(--bg-viewport);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        .gallery-viewport img {
+            max-width: 88%;
+            max-height: 88%;
+            object-fit: contain;
+        }
+
+        .gallery-body {
+            padding: 0.85rem 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+        }
+
+        /* VIEW 3: DATA TABLE */
+        .table-container {
+            display: none;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            text-align: left;
+        }
+
+        th {
+            background: var(--bg-base);
+            padding: 10px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+        }
+
+        td {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border-faint);
+            color: var(--fg-primary);
+            vertical-align: middle;
+        }
+
+        tr:hover td {
+            background: var(--bg-elevated);
+        }
+
+        .table-thumb {
+            width: 42px;
+            height: 42px;
+            background: var(--bg-viewport);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            object-fit: contain;
+            display: block;
+        }
+
+        /* SIDE INSPECTOR DRAWER */
+        .drawer-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.65);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            justify-content: flex-end;
+        }
+
+        .drawer-panel {
+            background: var(--bg-surface);
+            border-left: 1px solid var(--border-strong);
+            width: 100%;
+            max-width: 650px;
+            height: 100%;
+            overflow-y: auto;
+            padding: 1.75rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: -15px 0 35px rgba(0,0,0,0.8);
+            animation: slideIn 0.2s ease-out;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+
+        .drawer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1.25rem;
+            padding-bottom: 0.85rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .drawer-close {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            color: var(--fg-muted);
+            width: 30px;
+            height: 30px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 14px;
+        }
+
+        .drawer-close:hover {
+            background: var(--bg-hover);
+            color: var(--fg-white);
+        }
+
+        .drawer-viewport {
+            height: 200px;
+            background: var(--bg-viewport);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.25rem;
+            overflow: hidden;
+        }
+
+        .drawer-viewport img {
+            max-width: 90%;
+            max-height: 90%;
+            object-fit: contain;
+        }
+
+        .drawer-actions-row {
+            display: flex;
+            gap: 0.65rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .spec-block-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--green-bright);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 1.25rem 0 0.5rem;
+            padding-bottom: 4px;
+            border-bottom: 1px solid var(--border-faint);
+        }
+
+        .spec-grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.3rem 1.5rem;
+        }
+
+        .spec-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid var(--border-faint);
+            font-size: 13px;
+        }
+
+        .spec-k {
+            color: var(--fg-faint);
+        }
+
+        .spec-v {
+            font-family: var(--font-mono);
+            color: var(--fg-white);
+            text-align: right;
+            font-weight: 500;
+        }
+
+        /* FULLSCREEN CAMERA MODAL */
+        .camera-modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.88);
+            backdrop-filter: blur(8px);
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+
+        .camera-modal-content {
+            background: #0b0e13;
+            border: 1px solid var(--green-border);
+            border-radius: 8px;
+            width: 95%;
+            max-width: 1100px;
+            height: 85vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 25px 60px rgba(0,0,0,0.9);
+        }
+
+        .camera-modal-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1.25rem;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .camera-modal-frame {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            border: none;
+            background: #000;
+        }
+
+        /* SETTINGS MODAL */
+        .settings-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(4px);
+            z-index: 1100;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+        }
+
+        .settings-modal {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-strong);
+            border-radius: 6px;
+            max-width: 480px;
+            width: 100%;
+            padding: 1.5rem;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+        }
+
+        .settings-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 1.25rem;
+        }
+
+        .settings-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--fg-white);
+            font-family: var(--font-mono);
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 4px;
+            display: block;
+        }
+
+        .form-input {
+            width: 100%;
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 7px 11px;
+            color: var(--fg-white);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            outline: none;
+        }
+
+        .form-input:focus {
+            border-color: var(--green);
+        }
+
+        .settings-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.5rem;
+            margin-top: 1.5rem;
+            padding-top: 0.85rem;
+            border-top: 1px solid var(--border-faint);
+        }
+
+        @media (max-width: 1200px) {
+            .live-layout {
+                grid-template-columns: 1fr;
+            }
+            .live-metrics-box {
+                border-left: none;
+                padding-left: 0;
+            }
+            .camera-preview-box {
+                width: 100%;
+                height: 180px;
+            }
+            .feed-row {
+                grid-template-columns: 80px 1fr 180px 140px;
+            }
+            .feed-col-specs {
+                display: none;
+            }
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 0.75rem;
+            }
+            .feed-row {
+                grid-template-columns: 70px 1fr;
+                gap: 0.75rem;
+            }
+            .feed-col-metrics, .feed-col-status {
+                grid-column: span 2;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="console-root">
+        <!-- Integrated Header -->
+        <header class="console-header">
+            <div class="brand-cluster">
+                <span class="brand-name">SPARKX i7 TELEMETRY</span>
+                <span class="conn-pill" id="connPill"><span class="conn-dot" id="connDot"></span><span id="connText">CONNESSO</span></span>
+            </div>
+
+            <!-- Integrated Telemetry Strip -->
+            <div class="telemetry-summary">
+                <div class="stat-pill">
+                    <span class="stat-label">Lavori:</span>
+                    <span class="stat-num" id="stat-total-jobs">0</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="stat-label">Completamento:</span>
+                    <span class="stat-num green" id="stat-success-rate">0%</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="stat-label">Runtime:</span>
+                    <span class="stat-num" id="stat-runtime">0h 0m</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="stat-label">Filamento:</span>
+                    <span class="stat-num" id="stat-filament">0.0 kg</span>
+                </div>
+                <div class="stat-pill">
+                    <span class="stat-label">Spesa:</span>
+                    <span class="stat-num green" id="stat-total-cost">€0.00</span>
+                </div>
+            </div>
+
+            <div class="header-actions">
+                <button class="btn" onclick="triggerSync()" id="btnSync">Aggiorna (F5)</button>
+                <button class="btn" onclick="openSettings()">Impostazioni</button>
+                <button class="btn" onclick="triggerExportCSV()">Esporta CSV</button>
+                <button class="btn btn-green" onclick="window.print()">Stampa PDF</button>
+            </div>
+        </header>
+
+        <!-- LIVE TELEMETRY BANNER (Active Print + Live Camera) -->
+        <div class="live-banner" id="liveBanner">
+            <div class="live-layout">
+                <div>
+                    <div>
+                        <span class="live-badge"><span class="live-pulse"></span>LIVE STAMPA IN CORSO</span>
+                    </div>
+                    <div class="live-info-title" id="liveProjectName">Stampa attiva...</div>
+                    <div class="live-info-sub">
+                        <span>Tempo: <strong style="color:var(--fg-white);" id="liveDuration">0s</strong></span>
+                        <span>Quota Z: <strong style="color:var(--fg-white);" id="liveZ">0.0 mm</strong></span>
+                        <span>Estruso: <strong style="color:var(--fg-white);" id="liveFilament">0.0 m (0g)</strong></span>
+                    </div>
+                </div>
+
+                <div class="live-metrics-box">
+                    <div class="live-temp-item">
+                        <span class="temp-label">Estrusore (Nozzle)</span>
+                        <span class="temp-val" id="liveNozzleTemp">0° / 0°</span>
+                    </div>
+                    <div class="live-temp-item">
+                        <span class="temp-label">Piatto Riscaldato</span>
+                        <span class="temp-val" id="liveBedTemp">0° / 0°</span>
+                    </div>
+                </div>
+
+                <!-- Live Camera Small Viewport (Click to expand fullscreen) -->
+                <div class="camera-preview-box" onclick="openCameraFullscreen()" title="Clicca per aprire la telecamera a schermo intero">
+                    <iframe id="liveCameraFrame" src="about:blank" scrolling="no"></iframe>
+                    <div class="camera-hover-overlay">
+                        <span>● CAM LIVE</span>
+                        <span>Ingrandisci ⤢</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Operational Toolbar -->
+        <div class="action-toolbar">
+            <div class="filter-tabs">
+                <button class="tab-item active" data-filter="all" onclick="setStatusFilter('all', this)" id="tabAll">Tutti</button>
+                <button class="tab-item" data-filter="completed" onclick="setStatusFilter('completed', this)" id="tabCompleted">Completati</button>
+                <button class="tab-item" data-filter="cancelled" onclick="setStatusFilter('cancelled', this)" id="tabCancelled">Interrotti</button>
+            </div>
+
+            <div class="tool-cluster">
+                <input type="text" class="search-input" id="searchInput" placeholder="Filtra progetto, nozzle, profilo..." oninput="filterJobs()">
+
+                <select class="select-dark" id="nozzleFilter" onchange="filterJobs()">
+                    <option value="all">Nozzle: Tutti</option>
+                    <option value="0.4">Nozzle: 0.4 mm</option>
+                    <option value="0.8">Nozzle: 0.8 mm</option>
+                </select>
+
+                <select class="select-dark" id="supportFilter" onchange="filterJobs()">
+                    <option value="all">Supporti: Tutti</option>
+                    <option value="with_support">Con Supporti</option>
+                    <option value="no_support">Senza Supporti</option>
+                </select>
+
+                <select class="select-dark" id="sortSelect" onchange="filterJobs()">
+                    <option value="date_desc">Data (recenti)</option>
+                    <option value="date_asc">Data (meno recenti)</option>
+                    <option value="dur_desc">Durata maggiore</option>
+                    <option value="dur_asc">Durata minore</option>
+                    <option value="fil_desc">Consumo filamento (g)</option>
+                    <option value="cost_desc">Costo materiale (€)</option>
+                    <option value="name_asc">Nome file (A-Z)</option>
+                </select>
+
+                <div class="rate-wrapper" title="Modifica tariffa filamento">
+                    <span>Costo:</span>
+                    <input type="number" class="rate-input" id="costPerKgInput" value="20.0" step="0.5" min="5" max="100" onchange="recalculateCost(this.value)">
+                    <span>€/kg</span>
+                </div>
+
+                <div class="view-group">
+                    <button class="view-pill active" id="btnList" onclick="setViewMode('list')">Elenco</button>
+                    <button class="view-pill" id="btnGallery" onclick="setViewMode('gallery')">Galleria</button>
+                    <button class="view-pill" id="btnTable" onclick="setViewMode('table')">Tabella</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- VIEW 1: Feed Rows (Default) -->
+        <div class="feed-container" id="feedContainer"></div>
+
+        <!-- VIEW 2: Gallery Grid -->
+        <div class="gallery-grid" id="galleryContainer"></div>
+
+        <!-- VIEW 3: Data Table -->
+        <div class="table-container" id="tableContainer">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Anteprima</th>
+                        <th>Progetto</th>
+                        <th>Stato</th>
+                        <th>Data di Stampa</th>
+                        <th>Diametro Ugello</th>
+                        <th>Altezza Layer</th>
+                        <th>Profilo Slicer</th>
+                        <th>Riempimento</th>
+                        <th>Supporti</th>
+                        <th>Durata</th>
+                        <th>Stima</th>
+                        <th>Massa</th>
+                        <th>Costo</th>
+                        <th>Materiale</th>
+                    </tr>
+                </thead>
+                <tbody id="tableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Side-over Technical Inspector Drawer -->
+    <div class="drawer-overlay" id="inspectorDrawer" onclick="closeDrawer(event)">
+        <div class="drawer-panel" onclick="event.stopPropagation()">
+            <div class="drawer-header">
+                <div>
+                    <div style="font-size:16px; font-weight:700; color:var(--fg-white);" id="modalTitle"></div>
+                    <div style="font-family:var(--font-mono); font-size:12px; color:var(--fg-muted); word-break:break-all; margin-top:2px;" id="modalFilename"></div>
+                </div>
+                <button class="drawer-close" onclick="document.getElementById('inspectorDrawer').style.display='none'">&times;</button>
+            </div>
+
+            <div class="drawer-viewport" id="modalImgWrap"></div>
+
+            <div class="drawer-actions-row">
+                <button class="btn btn-green" id="btnDrawerReprint" onclick="reprintCurrentJob()">Ristampa File</button>
+                <button class="btn" id="btnDrawerDownload" onclick="downloadCurrentGcode()">Scarica .GCODE</button>
+            </div>
+
+            <div id="modalDetails"></div>
+        </div>
+    </div>
+
+    <!-- FULLSCREEN CAMERA MODAL -->
+    <div class="camera-modal-overlay" id="cameraModal" onclick="closeCameraFullscreen(event)">
+        <div class="camera-modal-content" onclick="event.stopPropagation()">
+            <div class="camera-modal-top">
+                <div style="font-family:var(--font-mono); font-size:13px; font-weight:700; color:var(--green-bright); display:flex; align-items:center; gap:8px;">
+                    <span class="live-pulse"></span>TELECAMERA CAMERA LIVE &bull; SPARKX i7
+                </div>
+                <button class="drawer-close" onclick="closeCameraFullscreen()">&times;</button>
+            </div>
+            <iframe class="camera-modal-frame" id="cameraModalFrame" src="about:blank"></iframe>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="settings-overlay" id="settingsModal" onclick="closeSettings(event)">
+        <div class="settings-modal" onclick="event.stopPropagation()">
+            <div class="settings-header">
+                <div class="settings-title">CONFIGURAZIONE STAMPANTE</div>
+                <button class="drawer-close" onclick="document.getElementById('settingsModal').style.display='none'">&times;</button>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Indirizzo IP Stampante</label>
+                <input type="text" class="form-input" id="cfgIp" value="192.168.78.50">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Porta Moonraker</label>
+                <input type="number" class="form-input" id="cfgPort" value="7125">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Tariffa Filamento Standard (€/kg)</label>
+                <input type="number" class="form-input" id="cfgCost" value="20.0" step="0.5">
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Intervallo Polling Telemetria (Secondi)</label>
+                <input type="number" class="form-input" id="cfgPoll" value="3" min="1" max="60">
+            </div>
+
+            <div class="settings-footer">
+                <button class="btn" onclick="testConnection()">Test Connessione</button>
+                <button class="btn btn-green" onclick="saveSettings()">Salva Configurazione</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allJobs = [];
+        let currentStatusFilter = 'all';
+        let costPerKg = 20.0;
+        let selectedJobId = null;
+        let printerIp = "192.168.78.50";
+
+        const svgPlaceholder = `<svg class="placeholder-svg" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M16 66h48M20 66V16h40v50M16 32h48" stroke="#2d3340" stroke-width="2" stroke-linecap="round"/>
+          <rect x="34" y="27" width="12" height="10" rx="1.5" fill="#14171f" stroke="#4b5563" stroke-width="1.5"/>
+          <path d="M38 37l2 4.5h-4l2-4.5z" fill="#10b981"/>
+          <path d="M40 21v6" stroke="#10b981" stroke-width="1.5" stroke-dasharray="2 2"/>
+          <path d="M40 46l12 6.5-12 6.5-12-6.5L40 46z" fill="#181e28" stroke="#10b981" stroke-width="1.5"/>
+          <path d="M28 52.5v7l12 6.5v-7l-12-6.5z" fill="#11141c" stroke="#374151" stroke-width="1.5"/>
+          <path d="M52 52.5v7l-12 6.5v-7l12-6.5z" fill="#161b24" stroke="#374151" stroke-width="1.5"/>
+          <line x1="28" y1="56" x2="40" y2="62.5" stroke="#252c38" stroke-width="1"/>
+          <line x1="40" y1="62.5" x2="52" y2="56" stroke="#252c38" stroke-width="1"/>
+        </svg>`;
+
+        // FORMATTO DATA ITALIANO ESTESO: es. "Venerdì 6 Novembre 2026, 17:32"
+        function formatItalianDate(timestamp, fallbackStr = "") {
+            let d = null;
+            if (timestamp && timestamp > 0) {
+                d = new Date(timestamp * 1000);
+            } else if (fallbackStr && fallbackStr !== 'N/D') {
+                d = new Date(fallbackStr.replace(' ', 'T'));
+            }
+            if (!d || isNaN(d.getTime())) return fallbackStr || 'Data non disponibile';
+
+            const giorni = ['Domenica', 'Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato'];
+            const mesi = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
+            
+            const giornoSettimana = giorni[d.getDay()];
+            const giorno = d.getDate();
+            const mese = mesi[d.getMonth()];
+            const anno = d.getFullYear();
+            const ore = String(d.getHours()).padStart(2, '0');
+            const minuti = String(d.getMinutes()).padStart(2, '0');
+
+            return `${giornoSettimana} ${giorno} ${mese} ${anno}, ${ore}:${minuti}`;
+        }
+
+        // Receive messages from C# host
+        window.chrome?.webview?.addEventListener('message', event => {
+            const msg = event.data;
+            if (msg.type === 'init') {
+                allJobs = msg.jobs || [];
+                costPerKg = msg.costPerKg || 20.0;
+                printerIp = msg.printerIp || "192.168.78.50";
+                document.getElementById('costPerKgInput').value = costPerKg.toFixed(1);
+                document.getElementById('cfgIp').value = printerIp;
+                updateSummaryKpis();
+                filterJobs();
+            } else if (msg.type === 'history_updated') {
+                allJobs = msg.jobs || [];
+                document.getElementById('btnSync').textContent = 'Aggiorna (F5)';
+                updateSummaryKpis();
+                filterJobs();
+            } else if (msg.type === 'live_status') {
+                updateLiveStatus(msg.status);
+            } else if (msg.type === 'test_conn_result') {
+                alert(msg.success ? 'Connessione stabilita con successo!' : 'Errore: stampante non raggiungibile.');
+            }
+        });
+
+        function sendToHost(action, payload = {}) {
+            if (window.chrome?.webview) {
+                window.chrome.webview.postMessage({ action, ...payload });
+            }
+        }
+
+        function triggerSync() {
+            document.getElementById('btnSync').textContent = 'Sincronizzazione...';
+            sendToHost('sync');
+        }
+
+        function triggerExportCSV() {
+            sendToHost('export_csv', { costPerKg });
+        }
+
+        function reprintCurrentJob() {
+            const j = allJobs.find(item => item.job_id === selectedJobId);
+            if (!j) return;
+            if (confirm(`Sei sicuro di voler avviare la stampa di '${j.project_name}' sulla stampante?`)) {
+                sendToHost('reprint', { filename: j.filename });
+            }
+        }
+
+        function downloadCurrentGcode() {
+            const j = allJobs.find(item => item.job_id === selectedJobId);
+            if (!j) return;
+            sendToHost('download_gcode', { filename: j.filename });
+        }
+
+        function openSettings() {
+            document.getElementById('settingsModal').style.display = 'flex';
+        }
+
+        function closeSettings(e) {
+            if (e.target.id === 'settingsModal') {
+                document.getElementById('settingsModal').style.display = 'none';
+            }
+        }
+
+        function testConnection() {
+            const ip = document.getElementById('cfgIp').value;
+            const port = parseInt(document.getElementById('cfgPort').value);
+            sendToHost('test_connection', { ip, port });
+        }
+
+        function saveSettings() {
+            const ip = document.getElementById('cfgIp').value;
+            const port = parseInt(document.getElementById('cfgPort').value);
+            const cost = parseFloat(document.getElementById('cfgCost').value);
+            const poll = parseInt(document.getElementById('cfgPoll').value);
+
+            costPerKg = cost;
+            printerIp = ip;
+            document.getElementById('costPerKgInput').value = costPerKg.toFixed(1);
+            document.getElementById('settingsModal').style.display = 'none';
+
+            sendToHost('save_settings', { ip, port, costPerKg: cost, pollInterval: poll });
+            updateSummaryKpis();
+            filterJobs();
+        }
+
+        // Camera handlers
+        function openCameraFullscreen() {
+            const modal = document.getElementById('cameraModal');
+            const frame = document.getElementById('cameraModalFrame');
+            frame.src = `http://${printerIp}:8000/`;
+            modal.style.display = 'flex';
+        }
+
+        function closeCameraFullscreen() {
+            const modal = document.getElementById('cameraModal');
+            const frame = document.getElementById('cameraModalFrame');
+            frame.src = 'about:blank';
+            modal.style.display = 'none';
+        }
+
+        function updateLiveStatus(st) {
+            const banner = document.getElementById('liveBanner');
+            const connPill = document.getElementById('connPill');
+            const connDot = document.getElementById('connDot');
+            const connText = document.getElementById('connText');
+            const camFrame = document.getElementById('liveCameraFrame');
+
+            if (!st || !st.is_connected) {
+                connPill.classList.add('offline');
+                connDot.classList.add('offline');
+                connText.textContent = 'OFFLINE';
+                banner.style.display = 'none';
+                if (camFrame.src !== 'about:blank') camFrame.src = 'about:blank';
+                return;
+            }
+
+            connPill.classList.remove('offline');
+            connDot.classList.remove('offline');
+            connText.textContent = st.is_printing ? 'STAMPA ATTIVA' : 'PRONTA';
+
+            if (st.is_printing) {
+                banner.style.display = 'block';
+                document.getElementById('liveProjectName').textContent = st.project_name || st.filename;
+                document.getElementById('liveDuration').textContent = st.print_duration_str;
+                document.getElementById('liveZ').textContent = `${st.current_z.toFixed(2)} mm`;
+                document.getElementById('liveFilament').textContent = `${st.filament_used_m.toFixed(2)}m (${st.filament_used_g.toFixed(1)}g)`;
+                document.getElementById('liveNozzleTemp').textContent = `${st.nozzle_temp.toFixed(1)}° / ${st.nozzle_target.toFixed(0)}°`;
+                document.getElementById('liveBedTemp').textContent = `${st.bed_temp.toFixed(1)}° / ${st.bed_target.toFixed(0)}°`;
+
+                // Set camera iframe source if not loaded
+                const camUrl = `http://${printerIp}:8000/`;
+                if (!camFrame.src.includes(':8000')) {
+                    camFrame.src = camUrl;
+                }
+            } else {
+                banner.style.display = 'none';
+            }
+        }
+
+        function updateSummaryKpis() {
+            const total = allJobs.length;
+            const completed = allJobs.filter(j => j.status === 'completed').length;
+            const cancelled = allJobs.filter(j => j.status === 'cancelled').length;
+
+            const totalSeconds = allJobs.reduce((acc, j) => acc + j.print_duration, 0);
+            const totalGrams = allJobs.reduce((acc, j) => acc + j.filament_g, 0);
+            const totalMeters = allJobs.reduce((acc, j) => acc + j.filament_m, 0);
+            const totalCost = (totalGrams * costPerKg / 1000.0).toFixed(2);
+
+            const hours = Math.floor(totalSeconds / 3600);
+            const mins = Math.floor((totalSeconds % 3600) / 60);
+            const rate = total > 0 ? (completed / total * 100.0).toFixed(1) : '0.0';
+
+            document.getElementById('stat-total-jobs').textContent = total;
+            document.getElementById('stat-success-rate').textContent = `${rate}%`;
+            document.getElementById('stat-runtime').textContent = `${hours}h ${mins}m`;
+            document.getElementById('stat-filament').textContent = `${(totalGrams/1000.0).toFixed(2)} kg`;
+            document.getElementById('stat-total-cost').textContent = `€${totalCost}`;
+
+            document.getElementById('tabAll').textContent = `Tutti (${total})`;
+            document.getElementById('tabCompleted').textContent = `Completati (${completed})`;
+            document.getElementById('tabCancelled').textContent = `Interrotti (${cancelled})`;
+        }
+
+        function renderFeed(jobs) {
+            const c = document.getElementById('feedContainer');
+            if (jobs.length === 0) {
+                c.innerHTML = '<div style="text-align: center; padding: 3rem; color: var(--fg-faint); font-family: var(--font-mono);">NESSUN RECORD CORRISPONDENTE</div>';
+                return;
+            }
+
+            c.innerHTML = jobs.map(j => {
+                const thumbHtml = j.thumbnail 
+                    ? `<img class="feed-thumb-img" src="${j.thumbnail}" alt="${j.project_name}" loading="lazy">`
+                    : svgPlaceholder;
+
+                const cost = ((j.filament_g * costPerKg) / 1000.0).toFixed(2);
+                const nozzleVal = j.nozzle_diameter !== 'N/D' ? `${j.nozzle_diameter}mm` : '0.4mm';
+                const layerVal = j.layer_height !== 'N/D' ? `${j.layer_height}mm` : 'N/D';
+
+                const deltaSpan = j.delta_str 
+                    ? `<span class="metric-delta">(${j.delta_str})</span>` 
+                    : '';
+
+                const italianDate = formatItalianDate(j.timestamp, j.start_time);
+
+                return `
+                <div class="feed-row" onclick="openInspector('${j.job_id}')">
+                    <div class="feed-thumb-box">${thumbHtml}</div>
+
+                    <div class="feed-col-primary">
+                        <div class="feed-title" title="${j.project_name}">${j.project_name}</div>
+                        <div class="feed-file" title="${j.filename}">${j.print_profile}</div>
+                        
+                        <!-- CLARIFIED TAGS SPECIFYING EXACT MEANING (NOZZLE, LAYER, INFILL) -->
+                        <div class="feed-tags">
+                            <span class="tag-pill green">${j.filament_name}</span>
+                            <span class="tag-pill highlight"><strong>Ugello:</strong> ${nozzleVal}</span>
+                            <span class="tag-pill highlight"><strong>Layer:</strong> ${layerVal}</span>
+                            <span class="tag-pill"><strong>Infill:</strong> ${j.infill_density !== 'N/D' ? j.infill_density : ''} ${j.infill_pattern}</span>
+                            ${j.supports_enabled ? `<span class="tag-pill green"><strong>Supporti:</strong> ${j.support_label.toUpperCase()}</span>` : ''}
+                            ${j.has_ironing ? `<span class="tag-pill green">STIRATURA</span>` : ''}
+                        </div>
+                    </div>
+
+                    <div class="feed-col-specs">
+                        <div class="spec-line"><span class="spec-label">Pareti</span><span class="spec-val">${j.wall_loops !== 'N/D' ? j.wall_loops : 'N/D'} loops</span></div>
+                        <div class="spec-line"><span class="spec-label">Velocità</span><span class="spec-val">${j.outer_wall_speed !== 'N/D' ? j.outer_wall_speed + ' mm/s' : 'N/D'}</span></div>
+                        <div class="spec-line"><span class="spec-label">Termica</span><span class="spec-val">${j.nozzle_temp}° / ${j.bed_temp}°</span></div>
+                        <div class="spec-line"><span class="spec-label">Altezza Z</span><span class="spec-val">${j.max_z !== 'N/D' ? j.max_z + ' mm' : 'N/D'}</span></div>
+                    </div>
+
+                    <div class="feed-col-metrics">
+                        <div class="metric-duration">${j.print_duration_str} ${deltaSpan}</div>
+                        <div class="metric-grams">${j.filament_g.toFixed(1)}g &bull; ${j.filament_m.toFixed(2)}m</div>
+                        <div class="metric-cost">€${cost}</div>
+                    </div>
+
+                    <div class="feed-col-status">
+                        <span class="status-badge ${j.status}">${j.status_label}</span>
+                        <!-- LARGER, EXTENDED ITALIAN DATE -->
+                        <div class="feed-date">${italianDate}</div>
+                        <span class="feed-job-id">#${j.job_id}</span>
+                    </div>
+                </div>
+                `;
+            }).join('');
+        }
+
+        function renderGallery(jobs) {
+            const c = document.getElementById('galleryContainer');
+            if (jobs.length === 0) {
+                c.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 3rem; color: var(--fg-faint);">NESSUN DATO</div>';
+                return;
+            }
+
+            c.innerHTML = jobs.map(j => {
+                const thumbHtml = j.thumbnail 
+                    ? `<img src="${j.thumbnail}" alt="${j.project_name}" loading="lazy">`
+                    : svgPlaceholder;
+
+                const cost = ((j.filament_g * costPerKg) / 1000.0).toFixed(2);
+                const italianDate = formatItalianDate(j.timestamp, j.start_time);
+                const nozzleVal = j.nozzle_diameter !== 'N/D' ? `${j.nozzle_diameter}mm` : '0.4mm';
+                const layerVal = j.layer_height !== 'N/D' ? `${j.layer_height}mm` : 'N/D';
+
+                return `
+                <div class="gallery-item" onclick="openInspector('${j.job_id}')">
+                    <div class="gallery-viewport">
+                        ${thumbHtml}
+                        <span class="status-badge ${j.status}" style="position:absolute; top:8px; right:8px;">${j.status_label}</span>
+                    </div>
+                    <div class="gallery-body">
+                        <div style="font-size:15px; font-weight:700; color:var(--fg-white); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${j.project_name}</div>
+                        <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:13px; margin: 3px 0;">
+                            <span style="color:var(--fg-white); font-weight:700;">${j.print_duration_str}</span>
+                            <span style="color:var(--green-bright); font-weight:700;">€${cost}</span>
+                        </div>
+                        <div style="display:flex; flex-wrap:wrap; gap:5px; margin: 4px 0;">
+                            <span class="tag-pill highlight"><strong>Ugello:</strong> ${nozzleVal}</span>
+                            <span class="tag-pill highlight"><strong>Layer:</strong> ${layerVal}</span>
+                        </div>
+                        <div style="font-size:13px; font-weight:600; color:var(--fg-white); margin-top:4px;">
+                            ${italianDate}
+                        </div>
+                    </div>
+                </div>
+                `;
+            }).join('');
+        }
+
+        function renderTable(jobs) {
+            const tbody = document.getElementById('tableBody');
+            if (jobs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="14" style="text-align: center; padding: 2rem; color: var(--fg-faint);">NESSUN RECORD</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = jobs.map(j => {
+                const thumbHtml = j.thumbnail 
+                    ? `<img class="table-thumb" src="${j.thumbnail}" alt="${j.project_name}">`
+                    : `<div class="table-thumb" style="display:flex;align-items:center;justify-content:center;">${svgPlaceholder}</div>`;
+
+                const cost = ((j.filament_g * costPerKg) / 1000.0).toFixed(2);
+                const italianDate = formatItalianDate(j.timestamp, j.start_time);
+
+                return `
+                <tr onclick="openInspector('${j.job_id}')" style="cursor:pointer;">
+                    <td>${thumbHtml}</td>
+                    <td><strong style="color:var(--fg-white); font-size:14px;">${j.project_name}</strong></td>
+                    <td><span class="status-badge ${j.status}">${j.status_label}</span></td>
+                    <td style="font-size:13px; font-weight:600; color:var(--fg-white);">${italianDate}</td>
+                    <td style="font-family:var(--font-mono); font-weight:600;"><span style="color:var(--fg-muted); font-size:11px;">Ugello:</span> ${j.nozzle_diameter} mm</td>
+                    <td style="font-family:var(--font-mono); font-weight:600;"><span style="color:var(--fg-muted); font-size:11px;">Layer:</span> ${j.layer_height} mm</td>
+                    <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-mono); color:var(--fg-muted);" title="${j.print_profile}">${j.print_profile}</td>
+                    <td style="font-family:var(--font-mono); font-size:13px;"><span style="color:var(--fg-muted); font-size:11px;">Infill:</span> ${j.infill_density} (${j.infill_pattern})</td>
+                    <td style="font-size:13px;">${j.supports_enabled ? j.support_label : 'No'}</td>
+                    <td style="font-family:var(--font-mono); font-weight:700; color:var(--fg-white); font-size:14px;">${j.print_duration_str}</td>
+                    <td style="font-family:var(--font-mono); color:var(--fg-faint); font-size:13px;">${j.time_est_str}</td>
+                    <td style="font-family:var(--font-mono); font-size:13px;">${j.filament_g.toFixed(1)}g</td>
+                    <td style="font-family:var(--font-mono); font-weight:700; color:var(--green-bright); font-size:14px;">€${cost}</td>
+                    <td><span class="tag-pill green">${j.filament_type}</span></td>
+                </tr>
+                `;
+            }).join('');
+        }
+
+        function filterJobs() {
+            const query = document.getElementById('searchInput').value.toLowerCase().trim();
+            const nozzleVal = document.getElementById('nozzleFilter').value;
+            const supportVal = document.getElementById('supportFilter').value;
+            const sortVal = document.getElementById('sortSelect').value;
+
+            let filtered = allJobs.filter(j => {
+                const matchesStatus = (currentStatusFilter === 'all') || (j.status === currentStatusFilter);
+                const matchesNozzle = (nozzleVal === 'all') || (j.nozzle_diameter.toString().startsWith(nozzleVal));
+                const matchesSupport = (supportVal === 'all') || 
+                    (supportVal === 'with_support' && j.supports_enabled) ||
+                    (supportVal === 'no_support' && !j.supports_enabled);
+
+                const matchesQuery = !query || 
+                    j.project_name.toLowerCase().includes(query) ||
+                    j.filename.toLowerCase().includes(query) ||
+                    j.print_profile.toLowerCase().includes(query) ||
+                    j.filament_name.toLowerCase().includes(query) ||
+                    j.filament_type.toLowerCase().includes(query) ||
+                    j.start_time.toLowerCase().includes(query) ||
+                    j.infill_pattern.toLowerCase().includes(query) ||
+                    j.nozzle_diameter.toString().includes(query);
+
+                return matchesStatus && matchesNozzle && matchesSupport && matchesQuery;
+            });
+
+            filtered.sort((a, b) => {
+                switch(sortVal) {
+                    case 'date_desc': return b.timestamp - a.timestamp;
+                    case 'date_asc': return a.timestamp - b.timestamp;
+                    case 'dur_desc': return b.print_duration - a.print_duration;
+                    case 'dur_asc': return a.print_duration - b.print_duration;
+                    case 'fil_desc': return b.filament_g - a.filament_g;
+                    case 'cost_desc': return b.filament_cost_eur - a.filament_cost_eur;
+                    case 'name_asc': return a.project_name.localeCompare(b.project_name);
+                    default: return b.timestamp - a.timestamp;
+                }
+            });
+
+            renderFeed(filtered);
+            renderGallery(filtered);
+            renderTable(filtered);
+        }
+
+        function setStatusFilter(status, btn) {
+            currentStatusFilter = status;
+            document.querySelectorAll('.tab-item').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            filterJobs();
+        }
+
+        function setViewMode(mode) {
+            const feed = document.getElementById('feedContainer');
+            const gallery = document.getElementById('galleryContainer');
+            const table = document.getElementById('tableContainer');
+
+            document.querySelectorAll('.view-pill').forEach(p => p.classList.remove('active'));
+
+            if (mode === 'list') {
+                feed.style.display = 'flex';
+                gallery.style.display = 'none';
+                table.style.display = 'none';
+                document.getElementById('btnList').classList.add('active');
+            } else if (mode === 'gallery') {
+                feed.style.display = 'none';
+                gallery.style.display = 'grid';
+                table.style.display = 'none';
+                document.getElementById('btnGallery').classList.add('active');
+            } else {
+                feed.style.display = 'none';
+                gallery.style.display = 'none';
+                table.style.display = 'block';
+                document.getElementById('btnTable').classList.add('active');
+            }
+        }
+
+        function recalculateCost(newCost) {
+            costPerKg = parseFloat(newCost) || 20.0;
+            updateSummaryKpis();
+            filterJobs();
+            sendToHost('cost_changed', { costPerKg });
+        }
+
+        function openInspector(jobId) {
+            selectedJobId = jobId;
+            const j = allJobs.find(item => item.job_id === jobId);
+            if (!j) return;
+
+            document.getElementById('modalTitle').textContent = j.project_name;
+            document.getElementById('modalFilename').textContent = `${j.filename} \u2022 Job #${j.job_id}`;
+
+            const imgWrap = document.getElementById('modalImgWrap');
+            if (j.thumbnail) {
+                imgWrap.innerHTML = `<img src="${j.thumbnail}">`;
+            } else {
+                imgWrap.innerHTML = svgPlaceholder;
+            }
+
+            const cost = ((j.filament_g * costPerKg) / 1000.0).toFixed(2);
+            const italianDate = formatItalianDate(j.timestamp, j.start_time);
+
+            const detailsHtml = `
+                <div class="spec-block-title">Configurazione Slicer & Profilazione</div>
+                <div class="spec-grid-2">
+                    <div class="spec-row"><span class="spec-k">Profilo di processo</span><span class="spec-v" style="color:var(--green-bright);">${j.print_profile}</span></div>
+                    <div class="spec-row"><span class="spec-k">Profilo stampante</span><span class="spec-v">${j.printer_profile}</span></div>
+                    <div class="spec-row"><span class="spec-k">Diametro Ugello (Nozzle)</span><span class="spec-v">${j.nozzle_diameter} mm</span></div>
+                    <div class="spec-row"><span class="spec-k">Software Slicer</span><span class="spec-v">${j.slicer}</span></div>
+                    <div class="spec-row"><span class="spec-k">Piano di Stampa</span><span class="spec-v">${j.bed_type}</span></div>
+                    <div class="spec-row"><span class="spec-k">Dimensione G-Code</span><span class="spec-v">${j.file_size_mb !== 'N/D' ? j.file_size_mb + ' MB' : 'N/D'}</span></div>
+                </div>
+
+                <div class="spec-block-title">Geometria, Struttura & Supporti</div>
+                <div class="spec-grid-2">
+                    <div class="spec-row"><span class="spec-k">Altezza Layer (Strato)</span><span class="spec-v">${j.layer_height} mm (1° layer: ${j.first_layer_height} mm)</span></div>
+                    <div class="spec-row"><span class="spec-k">Totale Layer / Quota Z Max</span><span class="spec-v">${j.total_layers} / ${j.max_z} mm</span></div>
+                    <div class="spec-row"><span class="spec-k">Pareti Perimetriche</span><span class="spec-v">${j.wall_loops} loops</span></div>
+                    <div class="spec-row"><span class="spec-k">Riempimento (Infill)</span><span class="spec-v">${j.infill_density} (${j.infill_pattern})</span></div>
+                    <div class="spec-row"><span class="spec-k">Supporti</span><span class="spec-v">${j.support_label} (${j.support_type})</span></div>
+                    <div class="spec-row"><span class="spec-k">Stiratura Superfici (Ironing)</span><span class="spec-v">${j.ironing_type}</span></div>
+                    <div class="spec-row"><span class="spec-k">Adesione Piatto (Brim)</span><span class="spec-v">${j.brim_type} (${j.brim_width} mm)</span></div>
+                    <div class="spec-row"><span class="spec-k">Cucitura Z (Seam)</span><span class="spec-v">${j.seam_position}</span></div>
+                </div>
+
+                <div class="spec-block-title">Parametri Cinematica & Termica</div>
+                <div class="spec-grid-2">
+                    <div class="spec-row"><span class="spec-k">Temperatura Nozzle (Stnd / 1°)</span><span class="spec-v">${j.nozzle_temp}°C / ${j.first_layer_nozzle_temp}°C</span></div>
+                    <div class="spec-row"><span class="spec-k">Temperatura Piatto (Stnd / 1°)</span><span class="spec-v">${j.bed_temp}°C / ${j.first_layer_bed_temp}°C</span></div>
+                    <div class="spec-row"><span class="spec-k">Velocità Parete Esterna</span><span class="spec-v">${j.outer_wall_speed} mm/s</span></div>
+                    <div class="spec-row"><span class="spec-k">Velocità Riempimento</span><span class="spec-v">${j.infill_speed} mm/s</span></div>
+                    <div class="spec-row"><span class="spec-k">Velocità Travel (Rapidi)</span><span class="spec-v">${j.travel_speed} mm/s</span></div>
+                    <div class="spec-row"><span class="spec-k">Ventola Raffreddamento</span><span class="spec-v">${j.fan_speed}%</span></div>
+                </div>
+
+                <div class="spec-block-title">Consumi & Telemetria Esecuzione</div>
+                <div class="spec-grid-2">
+                    <div class="spec-row"><span class="spec-k">Filamento Estruso (Massa)</span><span class="spec-v" style="color:var(--fg-white); font-weight:600;">${j.filament_g.toFixed(1)} g</span></div>
+                    <div class="spec-row"><span class="spec-k">Filamento Estruso (Lunghezza)</span><span class="spec-v">${j.filament_m.toFixed(2)} m</span></div>
+                    <div class="spec-row"><span class="spec-k">Costo Calcolato</span><span class="spec-v" style="color:var(--green-bright); font-weight:600;">€${cost} (@${costPerKg.toFixed(1)}/kg)</span></div>
+                    <div class="spec-row"><span class="spec-k">Identificativo Filamento</span><span class="spec-v">${j.filament_name} (${j.filament_type})</span></div>
+                    <div class="spec-row"><span class="spec-k">Durata Stampa Reale</span><span class="spec-v" style="color:var(--fg-white); font-weight:600;">${j.print_duration_str}</span></div>
+                    <div class="spec-row"><span class="spec-k">Stima Slicer vs Reale</span><span class="spec-v">${j.time_est_str} ${j.delta_str ? '(' + j.delta_str + ')' : ''}</span></div>
+                    <div class="spec-row"><span class="spec-k">Durata Totale (con warm-up)</span><span class="spec-v">${j.total_duration_str}</span></div>
+                    <div class="spec-row"><span class="spec-k">Data Esecuzione</span><span class="spec-v">${italianDate}</span></div>
+                </div>
+            `;
+            document.getElementById('modalDetails').innerHTML = detailsHtml;
+            document.getElementById('inspectorDrawer').style.display = 'flex';
+        }
+
+        function closeDrawer(e) {
+            if (e.target.id === 'inspectorDrawer') {
+                document.getElementById('inspectorDrawer').style.display = 'none';
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.getElementById('inspectorDrawer').style.display = 'none';
+                document.getElementById('settingsModal').style.display = 'none';
+                closeCameraFullscreen();
+            } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+                e.preventDefault();
+                document.getElementById('searchInput').focus();
+            } else if (e.key === 'F5') {
+                e.preventDefault();
+                triggerSync();
+            }
+        });
+    </script>
+</body>
+</html>

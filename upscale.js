@@ -1519,9 +1519,11 @@
         adhesion: "#A3E635",
         prime: "#22D3EE",
         travel: "#94A3B8",
-        wipe: "#94A3B8",
+        wipe: "#2DD4BF",
         retract: "#94A3B8",
         prep: "#FBBF24",
+        heating: "#F59E0B",
+        homing: "#38BDF8",
         paused: "#FB923C",
         complete: "#17CC5F",
         idle: "#8E8E93",
@@ -1828,8 +1830,8 @@
             .agy-telemetry-card {
                 flex: 1 1 280px;
                 min-width: 0;
-                min-height: 120px;
-                padding: 10px 14px;
+                min-height: 90px;
+                padding: 9px 13px;
                 background-color: var(--primary-new-detail-card-bg-color, #2B2B2B);
                 border-radius: 6px;
                 font-size: 14px;
@@ -1838,7 +1840,7 @@
                 display: flex;
                 flex-direction: column;
                 justify-content: space-between;
-                gap: 8px;
+                gap: 6px;
             }
             .agy-telemetry-row > .agy-telemetry-card {
                 width: 100%;
@@ -1849,8 +1851,26 @@
                 justify-content: space-between;
                 gap: 8px;
                 flex-wrap: nowrap;
+                min-width: 0;
             }
-            .agy-tel-meta {
+            .agy-tel-title {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                font-size: 11.5px;
+                font-weight: 600;
+                color: var(--primary-card-device-name-text-color, #AEAEB2);
+                letter-spacing: 0.1px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .agy-tel-icon {
+                font-size: 11.5px;
+                color: #FBBF24;
+                opacity: 0.95;
+            }
+            .agy-tel-actions {
                 display: flex;
                 align-items: center;
                 gap: 6px;
@@ -1858,72 +1878,46 @@
                 min-width: 0;
                 flex-shrink: 0;
             }
-            .agy-tel-srv-btn {
-                display: none;
-                align-items: center;
-                gap: 4px;
-                font-size: 10.5px;
-                font-weight: 600;
-                line-height: 16px;
-                padding: 2px 8px;
-                border-radius: 100px;
-                border: 1px solid rgba(23, 204, 95, 0.45);
-                background: rgba(23, 204, 95, 0.14);
-                color: #4ADE80;
-                cursor: pointer;
-                white-space: nowrap;
-                transition: background 0.14s ease, border-color 0.14s ease;
-            }
-            .agy-tel-srv-btn:hover:not(:disabled) {
-                background: rgba(23, 204, 95, 0.24);
-                border-color: rgba(23, 204, 95, 0.72);
-            }
-            .agy-tel-srv-btn.stop {
-                border-color: rgba(239, 68, 68, 0.42);
-                background: rgba(239, 68, 68, 0.12);
-                color: #FCA5A5;
-            }
-            .agy-tel-srv-btn.stop:hover:not(:disabled) {
-                background: rgba(239, 68, 68, 0.24);
-                border-color: rgba(239, 68, 68, 0.72);
-            }
-            .agy-tel-srv-btn:disabled {
-                opacity: 0.55;
-                cursor: not-allowed;
-            }
-            .agy-tel-src {
+            .agy-crono-btn {
                 display: inline-flex;
                 align-items: center;
                 gap: 5px;
                 font-size: 11px;
+                font-weight: 600;
                 line-height: 16px;
-                padding: 2px 8px;
-                border-radius: 100px;
-                background: rgba(23, 204, 95, 0.12);
-                color: var(--primary-button-hover-color, #17CC5F);
-                font-weight: 500;
+                padding: 3px 9px;
+                border-radius: 5px;
+                border: 1px solid rgba(23, 204, 95, 0.42);
+                background: linear-gradient(180deg, rgba(23, 204, 95, 0.20), rgba(23, 204, 95, 0.08));
+                color: #4ADE80;
+                cursor: pointer;
                 white-space: nowrap;
+                transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
             }
-            .agy-tel-src.fallback {
-                background: rgba(251, 191, 36, 0.14);
-                color: #FBBF24;
+            .agy-crono-btn:hover:not(:disabled) {
+                background: linear-gradient(180deg, rgba(23, 204, 95, 0.35), rgba(23, 204, 95, 0.16));
+                border-color: rgba(23, 204, 95, 0.85);
+                color: #FFFFFF;
+                transform: translateY(-1px);
+                box-shadow: 0 2px 6px rgba(23, 204, 95, 0.35);
             }
-            .agy-tel-src.offline {
-                background: rgba(142, 142, 147, 0.16);
-                color: var(--primary-card-device-name-text-color, #AEAEB2);
+            .agy-crono-btn:active:not(:disabled) {
+                transform: translateY(0);
             }
-            .agy-tel-src i {
-                width: 6px;
-                height: 6px;
-                border-radius: 50%;
-                background: currentColor;
-                display: inline-block;
+            .agy-crono-btn:disabled {
+                opacity: 0.65;
+                cursor: wait;
+            }
+            .agy-crono-icon {
+                font-size: 11px;
+                line-height: 1;
             }
             .agy-tel-main {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                gap: 12px;
+                gap: 10px;
                 min-width: 0;
                 flex: 1;
             }
@@ -1931,28 +1925,29 @@
                 display: flex;
                 flex-direction: column;
                 justify-content: center;
-                gap: 3px;
+                gap: 2px;
                 min-width: 0;
                 flex: 1;
             }
             .agy-tel-badge {
                 display: inline-flex;
                 align-items: center;
-                gap: 8px;
-                padding: 5px 12px;
+                gap: 7px;
+                padding: 4px 10px;
                 border-radius: 999px;
                 width: fit-content;
                 max-width: 100%;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 600;
                 letter-spacing: 0.1px;
                 border: 1px solid rgba(255, 255, 255, 0.10);
                 background: rgba(23, 204, 95, 0.14);
                 color: var(--primary-card-right-value-text-color, #FFFFFF);
+                box-sizing: border-box;
             }
             .agy-tel-badge-dot {
-                width: 8px;
-                height: 8px;
+                width: 7px;
+                height: 7px;
                 border-radius: 50%;
                 flex: none;
                 background: #17CC5F;
@@ -1971,7 +1966,7 @@
                 text-align: right;
             }
             .agy-tel-speed-val {
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: 700;
                 line-height: 1.05;
                 font-variant-numeric: tabular-nums;
@@ -1982,15 +1977,15 @@
                 color: var(--primary-card-device-name-text-color, #AEAEB2);
             }
             .agy-tel-speed-val .agy-unit {
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 600;
                 margin-left: 3px;
                 opacity: 0.85;
             }
             .agy-tel-speed-lbl {
-                font-size: 11px;
+                font-size: 10.5px;
                 color: var(--primary-card-device-name-text-color, #AEAEB2);
-                margin-top: 2px;
+                margin-top: 1px;
             }
 
             /* Dedicated 100% full-width secondary status container (sits above Velocità di stampa) */
@@ -2171,13 +2166,19 @@
         const cat = (payload.feature_category || "").toLowerCase();
         const raw = (payload.feature_raw || "").toLowerCase();
         const code = (payload.activity_code || "").toLowerCase();
+        const lbl = (payload.activity_label || "").toLowerCase();
 
         if (code === "paused") return CATEGORY_COLORS.paused;
         if (code === "complete") return CATEGORY_COLORS.complete;
         if (code === "error" || code === "disconnected") return CATEGORY_COLORS.error;
         if (code === "idle") return CATEGORY_COLORS.idle;
-        if (code === "preparing" || code === "heating" || code === "homing") return CATEGORY_COLORS.prep;
-        if (code === "travel" || code === "retract" || code === "wipe") return CATEGORY_COLORS.travel;
+        if (code === "heating" || lbl.includes("riscaldamento")) return CATEGORY_COLORS.heating;
+        if (code === "homing" || lbl.includes("allineamento") || lbl.includes("homing") || lbl.includes("livellamento") || lbl.includes("quota z")) return CATEGORY_COLORS.homing;
+        if (code === "wipe" || raw.includes("clean") || raw.includes("pulizia") || lbl.includes("pulizia")) return CATEGORY_COLORS.wipe;
+        if (code === "preparing" || lbl.includes("preparazione") || lbl.includes("caricamento")) return CATEGORY_COLORS.prep;
+        if (cat === "adhesion" || lbl.includes("spurgo") || raw.includes("spurgo")) return CATEGORY_COLORS.adhesion;
+        if (code === "retract") return CATEGORY_COLORS.retract;
+        if (code === "travel") return CATEGORY_COLORS.travel;
 
         if (raw.includes("outer") || raw.includes("external")) return CATEGORY_COLORS.wall_outer;
         if (raw.includes("overhang")) return CATEGORY_COLORS.overhang;
@@ -2277,25 +2278,40 @@
         };
     }
 
+    async function openCronoPrint(btnEl) {
+        const txt = btnEl ? btnEl.querySelector(".agy-crono-txt") : null;
+        if (btnEl) btnEl.disabled = true;
+        if (txt) txt.textContent = "Avvio...";
+        try {
+            const res = await fetch(`${CTRL_URL}/control/cronoprint/launch`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}",
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (txt) txt.textContent = data.already_running ? "In primo piano" : "Avviato!";
+            } else {
+                if (txt) txt.textContent = "Errore";
+            }
+        } catch (e) {
+            if (txt) txt.textContent = "Offline";
+        } finally {
+            setTimeout(() => {
+                if (btnEl) btnEl.disabled = false;
+                if (txt) txt.textContent = "CronoPrint";
+            }, 2000);
+        }
+    }
+
     function bindTelemetryCardEvents(card) {
         if (!card) return;
-        const srvBtn = card.querySelector(".agy-tel-srv-btn");
-        if (srvBtn && !srvBtn.__agyBound) {
-            srvBtn.__agyBound = true;
-            srvBtn.addEventListener("click", (e) => {
+        const cronoBtn = card.querySelector(".agy-crono-btn");
+        if (cronoBtn && !cronoBtn.__agyBound) {
+            cronoBtn.__agyBound = true;
+            cronoBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                const isUp = Boolean((serverControlStatus && (serverControlStatus.ai_running || serverControlStatus.port_8088_listening)) || serviceTelemetryOk);
-                controlServerAction(isUp ? "stop" : "start");
-            });
-        }
-        const srcPill = card.querySelector(".agy-tel-src");
-        if (srcPill && !srcPill.__agyBound) {
-            srcPill.__agyBound = true;
-            srcPill.style.cursor = "pointer";
-            srcPill.title = "Clicca per aprire il pannello Server AI";
-            srcPill.addEventListener("click", (e) => {
-                e.stopPropagation();
-                openAIPanel(false);
+                openCronoPrint(cronoBtn);
             });
         }
     }
@@ -2307,9 +2323,6 @@
         const qCard = (sel) => telemetryCardEl.querySelector(sel);
         const qStrip = (sel) => (telemetryStripEl && document.body.contains(telemetryStripEl)) ? telemetryStripEl.querySelector(sel) : null;
 
-        const elSrc = qCard(".agy-tel-src");
-        const elSrcText = qCard(".agy-tel-src-txt");
-        const elSrvBtn = qCard(".agy-tel-srv-btn");
         const elBadge = qCard(".agy-tel-badge");
         const elDot = qCard(".agy-tel-badge-dot");
         const elAct = qCard(".agy-tel-badge-txt");
@@ -2382,43 +2395,6 @@
             mode = "offline";
         }
 
-        // Source indicator pill & inline Server AI Start/Stop quick button
-        const srvRunning = Boolean((serverControlStatus && (serverControlStatus.ai_running || serverControlStatus.port_8088_listening)) || mode === "live");
-        if (elSrcText) {
-            if (mode === "live") {
-                elSrc.className = "agy-tel-src";
-                elSrcText.textContent = "Live";
-            } else if (mode === "fallback") {
-                elSrc.className = "agy-tel-src fallback";
-                elSrcText.textContent = "Diretto :9999";
-            } else {
-                elSrc.className = "agy-tel-src offline";
-                elSrcText.textContent = (serverControlOnline && !srvRunning) ? "Server spento" : "Offline";
-            }
-        }
-        if (elSrvBtn) {
-            if (serverControlBusy) {
-                elSrvBtn.style.display = "inline-flex";
-                elSrvBtn.disabled = true;
-                elSrvBtn.textContent = srvRunning ? "Arresto..." : "Avvio...";
-                elSrvBtn.className = srvRunning ? "agy-tel-srv-btn stop" : "agy-tel-srv-btn";
-            } else if (srvRunning) {
-                elSrvBtn.style.display = "inline-flex";
-                elSrvBtn.disabled = false;
-                elSrvBtn.textContent = "\u25a0 Stop AI";
-                elSrvBtn.title = "Ferma Server AI (:8088)";
-                elSrvBtn.className = "agy-tel-srv-btn stop";
-            } else if (serverControlOnline) {
-                elSrvBtn.style.display = "inline-flex";
-                elSrvBtn.disabled = false;
-                elSrvBtn.textContent = "\u25b6 Avvia AI";
-                elSrvBtn.title = "Avvia Server AI (:8088)";
-                elSrvBtn.className = "agy-tel-srv-btn";
-            } else {
-                elSrvBtn.style.display = "none";
-            }
-        }
-
         // Badge styling & activity text
         const color = resolveBadgeColor(view);
         const tint = applyHexTint(color);
@@ -2427,7 +2403,11 @@
             elBadge.style.borderColor = tint.border;
         }
         if (elDot) elDot.style.backgroundColor = color;
-        if (elAct) elAct.textContent = view.activity_label || "In attesa";
+        let actLabel = view.activity_label || "In attesa";
+        if (view.activity_code === "heating" && view.activity_detail && !actLabel.includes("°C")) {
+            actLabel = `${actLabel} (${view.activity_detail})`;
+        }
+        if (elAct) elAct.textContent = actLabel;
 
         // Extrusion / nozzle speed in mm/s
         const spd = Number(view.nozzle_speed_mm_s || 0);
@@ -2436,9 +2416,17 @@
         if (elSpeedWrap) elSpeedWrap.className = activelyMoving ? "agy-tel-speed-val" : "agy-tel-speed-val muted";
 
         if (elSpeedLbl) {
-            if (mode === "fallback") {
+            if (view.activity_code === "heating") {
+                elSpeedLbl.textContent = "In riscaldamento";
+            } else if (view.activity_code === "homing") {
+                elSpeedLbl.textContent = "In calibrazione";
+            } else if (view.activity_code === "wipe") {
+                elSpeedLbl.textContent = "In pulizia";
+            } else if (view.activity_code === "preparing") {
+                elSpeedLbl.textContent = "Preparazione";
+            } else if (mode === "fallback") {
                 elSpeedLbl.textContent = "Velocità stimata";
-            } else if (view.activity_code === "travel" || view.activity_code === "wipe") {
+            } else if (view.activity_code === "travel" || view.activity_code === "retract") {
                 elSpeedLbl.textContent = "Velocità spostamento";
             } else {
                 elSpeedLbl.textContent = "Velocità estrusione";
@@ -2566,16 +2554,22 @@
             card.className = "agy-telemetry-card";
             card.innerHTML = `
                 <div class="agy-tel-head">
-                    <span class="agy-tel-src offline"><i></i><span class="agy-tel-src-txt">Offline</span></span>
-                    <div class="agy-tel-meta">
-                        <button type="button" class="agy-tel-srv-btn"></button>
+                    <div class="agy-tel-title">
+                        <span class="agy-tel-icon">⚡</span>
+                        <span class="agy-tel-txt">Attività ugello</span>
+                    </div>
+                    <div class="agy-tel-actions">
+                        <button type="button" class="agy-crono-btn" title="Apri Console CronoPrint (storico stampe, consumi e telemetria avanzata)">
+                            <span class="agy-crono-icon">📊</span>
+                            <span class="agy-crono-txt">CronoPrint</span>
+                        </button>
                     </div>
                 </div>
                 <div class="agy-tel-main">
                     <div class="agy-tel-activity">
                         <div class="agy-tel-badge">
                             <span class="agy-tel-badge-dot"></span>
-                            <span class="agy-tel-badge-txt">In attesa di dati...</span>
+                            <span class="agy-tel-badge-txt">In attesa...</span>
                         </div>
                     </div>
                     <div class="agy-tel-speed-box">
@@ -2590,12 +2584,42 @@
             } else {
                 panelContainer.insertBefore(card, speedCtrlRow);
             }
-        } else if (fanCtrlRow) {
-            fanCtrlRow.classList.add("agy-fan-host-row");
-            if (card.parentElement !== fanCtrlRow) {
-                const oldWrapperRow = card.closest(".agy-telemetry-row");
-                fanCtrlRow.appendChild(card);
-                if (oldWrapperRow && oldWrapperRow !== fanCtrlRow) oldWrapperRow.remove();
+        } else {
+            if (!card.querySelector(".agy-crono-btn")) {
+                card.innerHTML = `
+                    <div class="agy-tel-head">
+                        <div class="agy-tel-title">
+                            <span class="agy-tel-icon">⚡</span>
+                            <span class="agy-tel-txt">Attività ugello</span>
+                        </div>
+                        <div class="agy-tel-actions">
+                            <button type="button" class="agy-crono-btn" title="Apri Console CronoPrint (storico stampe, consumi e telemetria avanzata)">
+                                <span class="agy-crono-icon">📊</span>
+                                <span class="agy-crono-txt">CronoPrint</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="agy-tel-main">
+                        <div class="agy-tel-activity">
+                            <div class="agy-tel-badge">
+                                <span class="agy-tel-badge-dot"></span>
+                                <span class="agy-tel-badge-txt">In attesa...</span>
+                            </div>
+                        </div>
+                        <div class="agy-tel-speed-box">
+                            <div class="agy-tel-speed-val muted"><span class="agy-tel-speed-num">0.0</span><span class="agy-unit">mm/s</span></div>
+                            <div class="agy-tel-speed-lbl">Velocità estrusione</div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (fanCtrlRow) {
+                fanCtrlRow.classList.add("agy-fan-host-row");
+                if (card.parentElement !== fanCtrlRow) {
+                    const oldWrapperRow = card.closest(".agy-telemetry-row");
+                    fanCtrlRow.appendChild(card);
+                    if (oldWrapperRow && oldWrapperRow !== fanCtrlRow) oldWrapperRow.remove();
+                }
             }
         }
         bindTelemetryCardEvents(card);

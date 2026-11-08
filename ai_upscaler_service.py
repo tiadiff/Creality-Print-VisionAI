@@ -32,7 +32,9 @@ import onnxruntime as ort
 from aiohttp import web
 
 from printer_telemetry import PrinterTelemetryTracker, validate_printer_ip
-from stringing_detector import StringingWatchdog, context_from_telemetry, decode_image_bytes
+from stringing_detector import StringingWatchdog
+
+import cp_lifecycle
 
 HOST = "127.0.0.1"
 PORT = 8088
@@ -611,6 +613,17 @@ for _cors_route in (
 async def _serve_app():
     global _shutdown_event
     _shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _on_creality_close():
+        if _shutdown_event is not None and not _shutdown_event.is_set():
+            try:
+                loop.call_soon_threadsafe(_shutdown_event.set)
+            except Exception:
+                pass
+
+    orphan_watcher = cp_lifecycle.start_orphan_guard(_on_creality_close, close_grace=8.0)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, HOST, PORT, reuse_address=True)
@@ -619,6 +632,8 @@ async def _serve_app():
     try:
         await _shutdown_event.wait()
     finally:
+        if orphan_watcher:
+            orphan_watcher.stop()
         await runner.cleanup()
 
 

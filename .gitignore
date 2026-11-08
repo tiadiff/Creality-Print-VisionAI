@@ -17,6 +17,14 @@ dist/
 build/
 *.zip
 
+# CronoPrint (.NET 8 WinForms) build outputs & runtime data
+CronoPrint/SparkXPrintConsole/[Bb]in/
+CronoPrint/SparkXPrintConsole/[Oo]bj/
+CronoPrint/printer_history.html
+history_cache.json
+*.user
+.vs/
+
 # OS artifacts
 .DS_Store
 Thumbs.db

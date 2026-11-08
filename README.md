@@ -435,17 +435,32 @@ The v1.1.0 update reorganizes the in-app control panel (`#aiPanel` in [`upscale.
   * Top-Right Badge (`#aiBadge`): Dedicated to Video Upscaler status (`AI · 30.0 fps`, `Upscaler disattivo`, or `Upscaler offline`).
   * Top-Left Badge (`#agyStringingHost`): Dedicated to Stringing Watchdog status (`Stringing AI · Attiva`, `Sospetto stringing 65%`, `Stampa in pausa · Stringing 91%`, or `Stringing AI · Off`), displaying the calibrated sensitivity percentage (`39% · soglia 0.76`) and count of ignored defects when active.
 
-### 3. Redesigned Extrusion Activity & Full-Width Project Telemetry Strip
+### 3. Redesigned Extrusion Activity, Comprehensive Startup Reporting & CronoPrint Integration
 
-To ensure perfect readability and prevent horizontal text truncation on narrow sidebars:
-* **Lean Side Card (`.agy-telemetry-card`):** Mounted in Row 2 directly alongside Creality's native *Modello di ventilatore* card. It focuses exclusively on:
-  * Connection & service state pill (`Live`, `Diretto :9999`, or `Offline`), with a one-click quick start/stop button (`▶ Avvia AI` / `■ Stop AI`).
-  * Prominent, color-tinted **Extrusion Activity Badge** (`Parete esterna`, `Riempimento`, `Stiratura`, `Supporto`, `Spostamento`, etc.) with pulsing indicator dot.
-  * High-contrast real-time **Nozzle Speed Display** (`mm/s`) with dynamic activity labeling (*Velocità estrusione* vs. *Velocità spostamento*).
-  * Redundant nozzle/bed temperatures and container titles have been removed, giving the card a clean, balanced 120 px profile matching the native fan widget.
+To ensure an ultra-clean, perfectly proportioned UI that seamlessly aligns with native Creality Print widgets:
+* **Compact Activity Card (`.agy-telemetry-card`):** Mounted in Row 2 directly alongside Creality's native *Modello di ventilatore* card:
+  * **Unified Geometry:** Slimmed down to an ergonomic profile perfectly aligned with adjacent controls, free of visual clutter. Redundant nozzle/bed temperatures, the red "Stop AI" button, and the "Live" badge have been removed from this card (lifecycle controls remain fully accessible inside the expandable `#aiPanel`).
+  * **Integrated CronoPrint Button (`[ 📊 CronoPrint ]`):** A high-visibility, translucent emerald quick-launch button mounted in the card header. Clicking it triggers the local supervisor (`/control/cronoprint/launch`) to silently execute [`Avvia_SparkX_Console.bat`](CronoPrint/Avvia_SparkX_Console.bat) without terminal popups, automatically bringing existing instances to the foreground if already open.
+  * **Granular Startup & Calibration Telemetry:** When a print starts or during calibration sequences, the card moves beyond generic status and reports exact machine activities in real time:
+    * *Riscaldamento piatto:* Displays live temperature convergence against target (e.g. `45 / 70 °C`).
+    * *Riscaldamento ugello:* Displays live nozzle heat-up progress against target (e.g. `140 / 230 °C`).
+    * *Allineamento assi (Homing):* Flags CoreXY coordinate homing and origin zeroing.
+    * *Calibrazione quota Z / Piatto:* Reports pressure sensor swap checks and nozzle probe touches.
+    * *Livellamento piatto (Bed Mesh):* Tracks automatic bed leveling matrix calibration.
+    * *Pulizia ugello:* Identifies motorized silicone brush and nozzle wiping routines (`WIPE` / `NOZZLE_CLEAR`).
+    * *Caricamento filamento:* Indicates smart rack and extruder feed loading.
+    * *Spurgo ed estrusione iniziale:* Identifies initial purge lines and nozzle prime ribbons.
+  * **High-Contrast Nozzle Speed (`mm/s`):** Displays real-time kinematic velocity paired with adaptive labeling (*Velocità estrusione*, *Velocità spostamento*, *In riscaldamento*, *In calibrazione*, *In pulizia*).
 * **Full-Width Telemetry Strip (`.agy-telemetry-strip`):** Injected directly above the native *Velocità di stampa* card, spanning 100% of the available container width:
   * **Top Row:** Displays the full, unclipped **Project / 3D Model Name** (`📦 Nome Oggetto`) with generous horizontal space, alongside `Layer X/Y`, job progress percentage, and elapsed / remaining time chips.
   * **Bottom Row:** Displays the complete unclipped **G-code Feature & Extrusion Line** (`G-code: Outer wall · Larghezza: 0.45 mm`) paired with real-time physical extrusion telemetry (`Filamento: X mm/s`, `Flusso: Y mm³/s`, `Fattore: Z%`).
+
+### 4. Automatic Creality Print Lifecycle Shutdown (`cp_lifecycle.py`)
+
+To ensure that background AI and telemetry servers never remain active when Creality Print is closed:
+* **Toolhelp32 Process Watcher:** [`server_manager.py`](server_manager.py) and the `:8088` servers continuously monitor the host `CrealityPrint.exe` process without external dependencies or heavy polling.
+* **Zero-Footprint Dormant Standby:** While Creality Print is closed, the supervisor remains dormant without listening on ports or communicating with the 3D printer.
+* **Automatic Server Termination:** When Creality Print exits, the supervisor immediately issues a graceful shutdown request followed by a recursive process-tree termination (`kill_process_tree`) targeting child Python processes, ensuring zero orphaned processes or lingering network traffic. Defense-in-depth orphan guards inside [`ai_upscaler_service.py`](ai_upscaler_service.py) and [`printer_telemetry.py`](printer_telemetry.py) ensure clean self-termination even if launched standalone.
 
 ---
 
@@ -531,7 +546,13 @@ Open Creality Print, connect to your 3D printer, and open the **Device** interfa
 ├── printer_telemetry.py         # Synchronized Moonraker + G-code Range telemetry & standalone HTTP server
 ├── stringing_detector.py        # Multi-orientation ridge stringing/spaghetti detector & auto-pause engine
 ├── server_manager.py            # Localhost supervisor (:8089) for in-app Start/Stop/Restart/Status/Logs
+├── cp_lifecycle.py              # Windows Toolhelp32 process watcher & automatic Creality Print closing lifecycle
 ├── upscale.js                   # Injected CEF script (DOM observer, canvas overlay, HUD, stringing boxes, server/speed/telemetry UI)
+├── CronoPrint/                  # Integrated SparkX CronoPrint telemetry & history console (.NET 8 WinForms + WebView2)
+│   ├── Avvia_SparkX_Console.bat # Standalone launcher script
+│   ├── Genera_Report_Stampe.bat # Offline HTML report runner
+│   ├── generate_printer_report.py # Standalone Python Moonraker history & range extractor
+│   └── SparkXPrintConsole/      # C# .NET 8 desktop application sources
 ├── build_fused_model.py         # Topological ONNX graph surgery & operator fusion tool
 ├── install_upscaler.ps1         # Automated PowerShell CEF injector & NTFS DACL manager
 ├── Avvia_AI_Upscaler.bat        # Production launcher script

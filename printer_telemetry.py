@@ -28,6 +28,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import cp_lifecycle
+
 
 # Default nozzle filament cross-sectional area for 1.75 mm filament (mm^2)
 DEFAULT_FILAMENT_DIAMETER_MM = 1.75
@@ -620,6 +622,9 @@ class _PrinterSessionCache:
         self.prev_live_xy: Optional[Tuple[float, float]] = None
         self.motion_dir: Optional[Tuple[float, float]] = None
 
+        self.last_gcode_store_check: float = 0.0
+        self.last_macro_stage: Optional[Tuple[str, str, str]] = None
+
         self.last_poll_ts: float = 0.0
         self.last_payload: Optional[dict] = None
 
@@ -636,6 +641,8 @@ class _PrinterSessionCache:
         self.last_matched_offset = 0
         self.last_feature_raw = ""
         self.last_layer_z = None
+        self.last_gcode_store_check = 0.0
+        self.last_macro_stage = None
         self.last_object = ""
         self.last_line_width = None
         self.prev_live_xy = None
@@ -840,7 +847,7 @@ class PrinterTelemetryTracker:
             try:
                 q = self._query_moonraker_json(
                     ip,
-                    "/printer/objects/query?print_stats&virtual_sdcard&gcode_move&motion_report&extruder&toolhead&exclude_object&display_status&heater_bed",
+                    "/printer/objects/query?print_stats&virtual_sdcard&gcode_move&motion_report&extruder&toolhead&exclude_object&display_status&heater_bed&prtouch_v3&custom_macro",
                 )
             except Exception as exc:
                 payload = {
@@ -898,6 +905,8 @@ class PrinterTelemetryTracker:
             eo = status.get("exclude_object", {}) or {}
             bed = status.get("heater_bed", {}) or {}
             ds = status.get("display_status", {}) or {}
+            prtouch = status.get("prtouch_v3", {}) or {}
+            cmacro = status.get("custom_macro", {}) or {}
 
             state = str(ps.get("state") or "standby").lower()
             raw_filename = str(ps.get("filename") or vsd.get("file_name") or "").strip()
@@ -1039,26 +1048,89 @@ class PrinterTelemetryTracker:
                 in_start_gcode = (
                     (not is_vsd_active)
                     or (gcode_start_byte > 0 and file_pos < gcode_start_byte)
-                    or (feature_raw.lower() == "custom" and (not layer or int(layer) == 0))
+                    or (feature_raw.lower() in ("custom", "") and (not layer or int(layer) == 0))
                 )
+
+                # During start preparation or early startup, inspect Klipper gcode_store macro events
+                if in_start_gcode or (layer is not None and int(layer) == 0 and not is_extruding):
+                    if (now - sess.last_gcode_store_check) > 1.2:
+                        sess.last_gcode_store_check = now
+                        try:
+                            gs = self._query_moonraker_json(ip, "/server/gcode_store?count=8", timeout=0.8)
+                            entries = gs.get("result", {}).get("gcode_store", [])
+                            for entry in reversed(entries):
+                                msg = str(entry.get("message") or "").strip()
+                                if msg.startswith("B:") or msg.startswith("T0:") or msg == "ok":
+                                    continue
+                                ml = msg.lower()
+                                if "nozzle_clean" in ml or "nozzle_clear" in ml or "clean_velocity" in ml or "box_nozzle_clean" in ml:
+                                    sess.last_macro_stage = ("wipe", "Pulizia ugello", "Pulizia e rimozione residui")
+                                    break
+                                elif "g28_re_check" in ml or "probe at" in ml or "swap test" in ml or "[pres_" in ml:
+                                    sess.last_macro_stage = ("homing", "Allineamento / Quota Z", "Controllo quota sensore Z")
+                                    break
+                                elif "bed_mesh" in ml or "cx_print_leveling" in ml:
+                                    sess.last_macro_stage = ("homing", "Livellamento piatto (Bed Mesh)", "Mappatura piano di stampa")
+                                    break
+                                elif "load_material" in ml or "box_start_print" in ml or "smart_filament" in ml:
+                                    sess.last_macro_stage = ("preparing", "Caricamento filamento", "Alimentazione filamento")
+                                    break
+                                elif "cancel_homez" in ml or "z-if_home" in ml or "z-home check" in ml or "x_axes" in ml or "if_need_home" in ml:
+                                    sess.last_macro_stage = ("homing", "Allineamento assi (Homing)", "Azzeramento assi X/Y/Z")
+                                    break
+                                elif "do_cooling" in ml:
+                                    sess.last_macro_stage = ("preparing", "Raffreddamento ugello", "Attesa stabilizzazione termica")
+                                    break
+                                elif "extruder_extrude" in ml or "flush_length" in ml or "material_flush" in ml:
+                                    sess.last_macro_stage = ("feature", "Spurgo filamento", "Spurgo iniziale estrusore")
+                                    break
+                        except Exception:
+                            pass
+
+                is_leveling = bool(
+                    prtouch.get("inside_calibrate")
+                    or (int(prtouch.get("calibrate_progress") or 0) > 0)
+                    or cmacro.get("leveling_calibration") == 1
+                    or th.get("G29_flag")
+                )
+                bed_heating = bool(
+                    bed_target and bed_temp is not None
+                    and float(bed_target) > 0
+                    and float(bed_temp) < float(bed_target) - 2.0
+                )
+                noz_heating = bool(
+                    noz_target and noz_temp is not None
+                    and float(noz_target) > 0
+                    and float(noz_temp) < float(noz_target) - 3.0
+                )
+
                 if in_start_gcode and not is_extruding:
-                    if bed_target and bed_temp is not None and float(bed_target) > 0 and float(bed_temp) < float(bed_target) - 2.0:
+                    if bed_heating:
                         activity_code = "heating"
                         activity_label = "Riscaldamento piatto"
                         activity_detail = f"{float(bed_temp):.0f} / {float(bed_target):.0f} °C"
-                    elif noz_target and noz_temp is not None and float(noz_target) > 0 and float(noz_temp) < float(noz_target) - 3.0:
+                    elif noz_heating:
                         activity_code = "heating"
                         activity_label = "Riscaldamento ugello"
                         activity_detail = f"{float(noz_temp):.0f} / {float(noz_target):.0f} °C"
+                    elif is_leveling:
+                        activity_code = "homing"
+                        activity_label = "Livellamento piatto (Bed Mesh)"
+                        activity_detail = "Calibrazione piano in corso"
+                    elif sess.last_macro_stage is not None and (now - sess.last_gcode_store_check) < 15.0:
+                        activity_code, activity_label, activity_detail = sess.last_macro_stage
                     elif "x" not in homed_axes or "y" not in homed_axes or "z" not in homed_axes:
                         activity_code = "homing"
-                        activity_label = "Homing / Livellamento"
+                        activity_label = "Allineamento assi (Homing)"
+                        activity_detail = "Azzeramento assi X/Y/Z"
                     else:
                         activity_code = "preparing"
                         activity_label = "Preparazione stampa"
-                elif feature_raw.lower() == "custom" and is_extruding:
+                        activity_detail = "Inizializzazione stampante"
+                elif (in_start_gcode or (layer is not None and int(layer) <= 1 and feature_raw.lower() in ("custom", ""))) and is_extruding:
                     activity_code = "feature"
-                    activity_label = "Linea di spurgo / Inizio"
+                    activity_label = "Linea di spurgo iniziale"
+                    activity_detail = "Estrusione di avvio"
                     feature_cat = "adhesion"
                 elif is_wiping:
                     activity_code = "wipe"
@@ -1402,11 +1474,21 @@ def run_standalone_server(
 ) -> None:
     srv = create_standalone_server(host=host, port=port, default_ip=default_ip, tracker=tracker, watchdog=watchdog)
     print(f"[Telemetry] Standalone server (Telemetry + Stringing AI) running on http://{host}:{port}")
+
+    def _on_creality_close():
+        try:
+            threading.Thread(target=srv.shutdown, name="OrphanShutdown", daemon=True).start()
+        except Exception:
+            pass
+
+    orphan_watcher = cp_lifecycle.start_orphan_guard(_on_creality_close, close_grace=8.0)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if orphan_watcher:
+            orphan_watcher.stop()
         srv.server_close()
 
 
