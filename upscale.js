@@ -375,7 +375,8 @@
         const regions = stringingStatus.regions;
         const state = stringingStatus.ai_state;
         if (!Array.isArray(regions) || !regions.length) return;
-        if (state !== "warning" && state !== "paused_by_ai" && state !== "alert_only" && Number(stringingStatus.score || 0) < 0.45) {
+        const hasIgnored = regions.some((r) => r && r.ignored);
+        if (!hasIgnored && state !== "warning" && state !== "paused_by_ai" && state !== "alert_only" && Number(stringingStatus.score || 0) < 0.45) {
             return;
         }
 
@@ -392,6 +393,28 @@
             const w = Number(r.w || 0) * box.w;
             const h = Number(r.h || 0) * box.h;
             if (w < 8 || h < 8) return;
+
+            if (r.ignored) {
+                // Subtle dashed border for acknowledged / ignored defect zones
+                stringingCtx.save();
+                stringingCtx.setLineDash([4, 4]);
+                stringingCtx.strokeStyle = "rgba(148, 163, 184, 0.70)";
+                stringingCtx.lineWidth = 1.6;
+                stringingCtx.fillStyle = "rgba(100, 116, 139, 0.08)";
+                stringingCtx.fillRect(x, y, w, h);
+                stringingCtx.strokeRect(x, y, w, h);
+
+                const tag = `Letto \u00b7 Ignorato`;
+                stringingCtx.font = '600 10px "Segoe UI", sans-serif';
+                const twLbl = stringingCtx.measureText(tag).width + 8;
+                const ly = y > 18 ? y - 16 : y + 3;
+                stringingCtx.fillStyle = "rgba(51, 65, 85, 0.88)";
+                stringingCtx.fillRect(x, ly, twLbl, 14);
+                stringingCtx.fillStyle = "#CBD5E1";
+                stringingCtx.fillText(tag, x + 4, ly + 11);
+                stringingCtx.restore();
+                return;
+            }
 
             stringingCtx.fillStyle = fill;
             stringingCtx.fillRect(x, y, w, h);
@@ -741,14 +764,14 @@
                     txt.textContent = "Stringing AI · Calibrazione...";
                 } else if (state === "monitoring") {
                     const isBackoff = Number(st.backoff_level || 0) > 0;
+                    const ignCount = Number(st.ignored_count || 0);
                     badge.className = "agy-str-badge ok";
-                    if (isBackoff) {
-                        txt.textContent = conf >= 15 ? `Stringing AI · Attiva (${conf}% · sens. ridotta)` : "Stringing AI · Attiva (sens. ridotta)";
-                        badge.title = `Ricalibrata: scena memorizzata, sensibilità ridotta (${st.effective_sensitivity || "ridotta"})`;
-                    } else {
-                        txt.textContent = conf >= 15 ? `Stringing AI · Attiva (${conf}%)` : "Stringing AI · Attiva";
-                        badge.title = "Clicca per impostazioni AI Stringing";
-                    }
+                    let badgeTxt = "Stringing AI · Attiva";
+                    if (ignCount > 0) badgeTxt += ` (${ignCount} letti)`;
+                    else if (conf >= 15) badgeTxt += ` (${conf}%)`;
+                    if (isBackoff) badgeTxt += " · sens. ridotta";
+                    txt.textContent = badgeTxt;
+                    badge.title = `Sensibilità: ${st.sensitivity_pct || 39}% · ${st.effective_sensitivity || "default"} · ${ignCount} difetti ignorati`;
                 } else if (state === "paused") {
                     badge.className = "agy-str-badge muted";
                     txt.textContent = "Stringing AI · Stampante in pausa";
@@ -762,31 +785,50 @@
 
         // Update AI Panel drawer stats if mounted
         if (uiContainer) {
+            const elSens = uiContainer.querySelector("#hudStrSensPct");
+            const elIgnored = uiContainer.querySelector("#hudStrIgnored");
             const elState = uiContainer.querySelector("#hudStrState");
             const elConf = uiContainer.querySelector("#hudStrConf");
             const elLat = uiContainer.querySelector("#hudStrLat");
             const elStreak = uiContainer.querySelector("#hudStrStreak");
-            if (elState && st && st.ok) {
-                const map = {
-                    monitoring: "Attiva (Pulita)",
-                    calibrating: "Calibrazione scena",
-                    warning: "Sospetto stringing",
-                    paused_by_ai: "Pausa Automatica",
-                    alert_only: "Avviso Stringing",
-                    paused: "Stampante in pausa",
-                    standby: "In attesa stampa",
-                    disabled: "Disattivata",
-                };
-                elState.textContent = map[st.ai_state] || st.ai_state;
-                const rawFrameScore = st.frame_score !== undefined ? st.frame_score : st.score;
-                elConf.textContent = `${Math.round(Number(st.ema_score || 0) * 100)}% (frame ${Math.round(Number(rawFrameScore || 0) * 100)}%)`;
-                elLat.textContent = `${Number(st.avg_infer_ms || 0).toFixed(1)} ms`;
-                elStreak.textContent = `${Number(st.streak_sec || 0).toFixed(1)} / ${Number(st.confirm_seconds || 4.5).toFixed(1)}s`;
-            } else if (elState) {
-                elState.textContent = settings.stringingEnabled ? "Servizio :8088 offline" : "Disattivata";
-                elConf.textContent = "-";
-                elLat.textContent = "-";
-                elStreak.textContent = "-";
+            if (st && st.ok) {
+                if (elSens) {
+                    const sensPct = st.sensitivity_pct !== undefined ? st.sensitivity_pct : Math.round((1.0 - (st.threshold || 0.65)) * 100);
+                    const isBackoff = Number(st.backoff_level || 0) > 0;
+                    elSens.textContent = `${sensPct}% (soglia ${st.threshold}${isBackoff ? " · ridotta" : ""})`;
+                    elSens.style.color = isBackoff ? "#F59E0B" : "#F2F2F4";
+                }
+                if (elIgnored) {
+                    const ignCount = Number(st.ignored_count || 0);
+                    elIgnored.textContent = ignCount > 0 ? `${ignCount} attivi` : "0";
+                    elIgnored.style.color = ignCount > 0 ? "#94A3B8" : "#8E8E93";
+                }
+                if (elState) {
+                    const map = {
+                        monitoring: "Attiva (Pulita)",
+                        calibrating: "Calibrazione scena",
+                        warning: "Sospetto stringing",
+                        paused_by_ai: "Pausa Automatica",
+                        alert_only: "Avviso Stringing",
+                        paused: "Stampante in pausa",
+                        standby: "In attesa stampa",
+                        disabled: "Disattivata",
+                    };
+                    elState.textContent = map[st.ai_state] || st.ai_state;
+                }
+                if (elConf) {
+                    const rawFrameScore = st.frame_score !== undefined ? st.frame_score : st.score;
+                    elConf.textContent = `${Math.round(Number(st.ema_score || 0) * 100)}% (frame ${Math.round(Number(rawFrameScore || 0) * 100)}%)`;
+                }
+                if (elLat) elLat.textContent = `${Number(st.avg_infer_ms || 0).toFixed(1)} ms`;
+                if (elStreak) elStreak.textContent = `${Number(st.streak_sec || 0).toFixed(1)} / ${Number(st.confirm_seconds || 4.5).toFixed(1)}s`;
+            } else {
+                if (elSens) { elSens.textContent = "-"; elSens.style.color = "#F2F2F4"; }
+                if (elIgnored) { elIgnored.textContent = "0"; elIgnored.style.color = "#8E8E93"; }
+                if (elState) elState.textContent = settings.stringingEnabled ? "Servizio :8088 offline" : "Disattivata";
+                if (elConf) elConf.textContent = "-";
+                if (elLat) elLat.textContent = "-";
+                if (elStreak) elStreak.textContent = "-";
             }
         }
 
@@ -1044,12 +1086,12 @@
                 .agy-str-bar-fill{height:100%;width:0%;background:#F59E0B;transition:width .25s ease}
                 .agy-str-badge.danger .agy-str-bar-fill{background:#EF4444}
 
-                #agyStringingAlert{display:none;pointer-events:auto;width:320px;max-width:calc(100vw - 48px);background:rgba(24,20,22,.96);backdrop-filter:blur(16px);border:1px solid rgba(239,68,68,.65);border-radius:10px;padding:12px;color:#f4f4f6;box-shadow:0 12px 32px rgba(0,0,0,.6)}
+                #agyStringingAlert{display:none;pointer-events:auto;width:340px;max-width:calc(100vw - 48px);background:rgba(24,20,22,.96);backdrop-filter:blur(16px);border:1px solid rgba(239,68,68,.65);border-radius:10px;padding:12px;color:#f4f4f6;box-shadow:0 12px 32px rgba(0,0,0,.6)}
                 .agy-str-alert-title{font-size:12.5px;font-weight:700;color:#FCA5A5;margin-bottom:4px}
                 .agy-str-alert-desc{font-size:11px;color:#d4d4d8;margin-bottom:8px;line-height:1.35}
                 .agy-str-alert-img{width:100%;max-height:145px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,.1);margin-bottom:8px;display:none}
-                .agy-str-alert-actions{display:flex;gap:8px}
-                .agy-str-alert-actions button{flex:1;padding:6px 8px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.14);background:#27272a;color:#f4f4f6}
+                .agy-str-alert-actions{display:flex;gap:6px;flex-wrap:wrap}
+                .agy-str-alert-actions button{flex:1 1 auto;padding:6px 8px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.14);background:#27272a;color:#f4f4f6}
                 .agy-str-alert-actions button.primary{background:#17CC5F;border-color:#17CC5F;color:#0b1810}
             </style>
 
@@ -1108,20 +1150,27 @@
                                     <div>Pausa automatica stampa<small>Invia PAUSA immediata alla conferma</small></div>
                                     <input type="checkbox" class="ai-switch" id="strAutoPauseToggle" ${settings.stringingAutoPause ? "checked" : ""}>
                                 </div>
-                                <div class="ai-label">Sensibilit&agrave; rilevamento</div>
+                                <div class="ai-label">Profilo sensibilit&agrave;</div>
                                 <select id="strSensSelect" class="ai-select" style="margin-bottom:8px">
-                                    <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; 6.5s)</option>
-                                    <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; 4.8s)</option>
-                                    <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; 3.2s)</option>
+                                    <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; ~39%)</option>
+                                    <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; ~59%)</option>
+                                    <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; ~83%)</option>
                                 </select>
-                                <div class="ai-stats">
+                                <div class="ai-stats" style="margin-bottom:8px">
+                                    <div class="ai-stat">Sensibilit&agrave; calib.<b id="hudStrSensPct">-</b></div>
+                                    <div class="ai-stat">Difetti ignorati<b id="hudStrIgnored">0</b></div>
                                     <div class="ai-stat">Stato<b id="hudStrState">-</b></div>
                                     <div class="ai-stat">Rischio<b id="hudStrConf">-</b></div>
                                     <div class="ai-stat">Conferma<b id="hudStrStreak">-</b></div>
                                     <div class="ai-stat">Analisi<b id="hudStrLat">- ms</b></div>
                                 </div>
+                                <div class="ai-btn-row" style="margin-bottom:6px">
+                                    <button type="button" class="ai-btn ai-btn-primary" id="btnStrAck" title="Contrassegna gli allarmi attuali come letti ed ignorati senza abbassare la sensibilità del resto del piatto">Segna letti &amp; Ignora</button>
+                                    <button type="button" class="ai-btn" id="btnStrResetSens" title="Ripristina la sensibilità originale impostata nel profilo (annulla il backoff)">Ripristina sensibilit&agrave;</button>
+                                </div>
                                 <div class="ai-btn-row">
-                                    <button class="ai-btn" id="btnStrReset">Ricalibra scena</button>
+                                    <button type="button" class="ai-btn" id="btnStrReset" title="Ricalibra l'intero sfondo della camera">Ricalibra scena</button>
+                                    <button type="button" class="ai-btn" id="btnStrClearIgnored" title="Ricomincia a monitorare anche le zone precedentemente ignorate" style="font-size:11px">Svuota ignorati</button>
                                 </div>
                             </div>
                             <div id="strDisabledMsg" style="color:#8e8e93;font-size:11px;margin-top:4px;${settings.stringingEnabled ? "display:none" : ""}">
@@ -1218,7 +1267,8 @@
                 <div class="agy-str-alert-desc"></div>
                 <img class="agy-str-alert-img" alt="Snapshot stringing AI" onerror="this.style.display='none'">
                 <div class="agy-str-alert-actions">
-                    <button type="button" class="primary" id="btnAlertReset">Pulisci &amp; Riarma AI</button>
+                    <button type="button" class="primary" id="btnAlertAck">Segna letto &amp; Continua</button>
+                    <button type="button" id="btnAlertReset">Ricalibra scena</button>
                     <button type="button" id="btnAlertDismiss">Chiudi</button>
                 </div>
             </div>
@@ -1230,18 +1280,29 @@
         const q = (id) => uiContainer.querySelector(id);
         const badge = q("#aiBadge"), panel = q("#aiPanel"), badgeText = q("#badgeText");
 
+        function sendStringingAction(endpoint, wsAction) {
+            const addr = findPrinterAddress(activeVideo) || findPrinterAddress(sliderEl) || activePrinterIp;
+            if (ws && ws.readyState === WebSocket.OPEN && wsAction) {
+                try { ws.send(JSON.stringify({ action: wsAction, ip: addr || undefined })); } catch (e) {}
+            }
+            const ipQ = addr ? `?ip=${encodeURIComponent(addr)}` : "";
+            fetch(`${API_URL}/ai/stringing/${endpoint}${ipQ}`, { method: "POST" })
+                .then((r) => (r.ok ? r.json() : null))
+                .then((json) => { if (json && json.ok) handleStringingStatus(json); })
+                .catch(() => {});
+        }
+
         stringingBadgeEl.addEventListener("click", (e) => {
             e.stopPropagation();
             openAIPanel(false);
         });
+        strHost.querySelector("#btnAlertAck").addEventListener("click", (e) => {
+            e.stopPropagation();
+            sendStringingAction("ack", "stringing_ack");
+        });
         strHost.querySelector("#btnAlertReset").addEventListener("click", (e) => {
             e.stopPropagation();
-            const addr = findPrinterAddress(activeVideo) || findPrinterAddress(sliderEl);
-            const ipQ = addr ? `?ip=${encodeURIComponent(addr)}` : "";
-            fetch(`${API_URL}/ai/stringing/reset${ipQ}`, { method: "POST" })
-                .then((r) => (r.ok ? r.json() : null))
-                .then((json) => { if (json && json.ok) handleStringingStatus(json); })
-                .catch(() => {});
+            sendStringingAction("reset", "stringing_reset");
         });
         strHost.querySelector("#btnAlertDismiss").addEventListener("click", (e) => {
             e.stopPropagation();
@@ -1374,14 +1435,10 @@
         });
         q("#strAutoPauseToggle").addEventListener("change", (e) => { settings.stringingAutoPause = e.target.checked; saveSettings(); pushStringingConfigToService(); });
         q("#strSensSelect").addEventListener("change", (e) => { settings.stringingSensitivity = e.target.value; saveSettings(); pushStringingConfigToService(); });
-        q("#btnStrReset").addEventListener("click", () => {
-            const addr = findPrinterAddress(activeVideo) || findPrinterAddress(sliderEl);
-            const ipQ = addr ? `?ip=${encodeURIComponent(addr)}` : "";
-            fetch(`${API_URL}/ai/stringing/reset${ipQ}`, { method: "POST" })
-                .then((r) => (r.ok ? r.json() : null))
-                .then((json) => { if (json && json.ok) handleStringingStatus(json); })
-                .catch(() => {});
-        });
+        q("#btnStrAck").addEventListener("click", () => sendStringingAction("ack", "stringing_ack"));
+        q("#btnStrResetSens").addEventListener("click", () => sendStringingAction("reset_sensitivity", "stringing_reset_sens"));
+        q("#btnStrReset").addEventListener("click", () => sendStringingAction("reset", "stringing_reset"));
+        q("#btnStrClearIgnored").addEventListener("click", () => sendStringingAction("clear_ignored", "stringing_clear_ignored"));
         q("#fgToggle").addEventListener("change", (e) => { settings.frameGenEnabled = e.target.checked; saveSettings(); });
         q("#fpsSelect").addEventListener("change", (e) => { settings.targetFps = e.target.value; saveSettings(); });
         q("#inputSelect").addEventListener("change", (e) => { settings.aiInput = e.target.value; saveSettings(); });

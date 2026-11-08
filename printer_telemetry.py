@@ -1263,6 +1263,24 @@ def create_standalone_server(
                         return
                     ip = validate_printer_ip(ip_raw, default_ip)
                     self._send_json(watchdog.reset_baseline(ip))
+                elif parsed.path == "/ai/stringing/ack":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    self._send_json(watchdog.acknowledge_defects(ip))
+                elif parsed.path == "/ai/stringing/reset_sensitivity":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    self._send_json(watchdog.reset_sensitivity(ip))
+                elif parsed.path == "/ai/stringing/clear_ignored":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    self._send_json(watchdog.clear_ignored_defects(ip))
                 elif parsed.path == "/ai/stringing/snapshot":
                     if watchdog is None:
                         self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
@@ -1329,6 +1347,24 @@ def create_standalone_server(
                         return
                     ip = validate_printer_ip(ip_raw, default_ip)
                     self._send_json(watchdog.reset_baseline(ip))
+                elif parsed.path == "/ai/stringing/ack":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    self._send_json(watchdog.acknowledge_defects(ip))
+                elif parsed.path == "/ai/stringing/reset_sensitivity":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    self._send_json(watchdog.reset_sensitivity(ip))
+                elif parsed.path == "/ai/stringing/clear_ignored":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    self._send_json(watchdog.clear_ignored_defects(ip))
                 elif parsed.path == "/printer/pause":
                     if watchdog is None:
                         self._send_json({"ok": False, "error": "Pause helper unavailable"}, status=503)

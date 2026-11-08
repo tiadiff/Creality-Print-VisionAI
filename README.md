@@ -354,8 +354,15 @@ When the user adjusts the custom micro-precision print speed slider in the Creal
 ### 3. Real-Time Stringing AI & Automatic Print Pause (`stringing_detector.py`)
 Creality Vision AI continuously analyzes decoded chamber frames from the SparkX i7 camera (~2.3 Hz in background threads) using [`stringing_detector.py`](stringing_detector.py):
 * **Multi-Orientation Symmetrical Ridge Extractor:** Combines luma + CIE `Lab` chroma channels with CLAHE shadow normalization and dual-scale ($d=2,3$) directional response across 6 orientations ($0^\circ\text{--}150^\circ$), suppressing step-edge walls, rectilinear infill, and solid tree supports while isolating thin extruded wisps, cobwebs, and spaghetti loops.
-* **Textured PEI Plate Glare & Carpet Shimmer Suppression:** Analyzes tile ridge floor medians (`tile_fmap_med >= 7.0`) and macro Gaussian color divergence against baseline (`bg_macro_lab`). Glare and high-frequency glitter on bare textured gold PEI sheets without genuine macro structural contrast or elongated strands are suppressed, completely preventing empty-bed false alarms even under carriage vibration, Z-drop parallax, or exposure shifts.
-* **Recalibration Baseline Absorption & Sensitivity Backoff:** When the user clicks *"Ricalibra scena"* / *"Pulisci & Riarma AI"* (or resumes printing after an alert), the watchdog absorbs the current scene into its spatial baseline envelope (`bg_envelope`) and automatically steps down to the next less sensitive tier (`high -> balanced -> low -> ultra_low`). The AI remains active in the background to monitor whether stringing worsens or escalates beyond what was accepted, without continually re-alerting on the existing print state.
+* **Textured PEI Plate Glare & Carpet Shimmer Suppression:** Analyzes tile ridge floor medians (`tile_fmap_med >= 7.0`), macro delta strand contrast (`macro_delta_strand >= 7.5`), and macro Gaussian color divergence against baseline (`bg_macro_lab`). Glare and high-frequency specular sparkle on bare textured gold PEI sheets without genuine macro structural contrast or elongated strands are suppressed, completely preventing empty-bed false alarms even under carriage vibration, Z-drop parallax, or chamber LED shifts.
+* **Chamber Perimeter & Upper Gantry Exclusion:** Automatically clips the upper 12% of the chamber camera frame (`y < 0.12`), preventing overhead gantry rails, CoreXY belt pulleys, and ceiling LED direct reflections from entering the spatial candidate matrix.
+* **Defect Spatial Exclusion & Acknowledgment ("Segna come letti & Ignora"):** Rather than globally degrading detector sensitivity across the entire build plate when benign stringing occurs, the watchdog implements persistent spatial defect tracking (`ignored_defects`). Clicking *"Segna come letto & Continua"* (in the alert banner) or *"Segna letti & Ignora"* (in the control panel) registers each currently detected defect with a unique ID (`DEF-1`, `DEF-2`, etc.) and bounding box coordinates:
+  * **Zero-Alarm Masking:** Candidates matching acknowledged regions (via spatial containment and IoU matching) are excluded from the frame threat score, guaranteeing zero recurring false alarms or auto-pauses for previously reviewed defects.
+  * **Full Global Vigilance:** Full detection sensitivity is maintained across all other regions of the build plate to catch any new spaghetti or stringing outbreaks immediately.
+  * **Subtle Visual HUD Footprint:** Ignored defects render on the camera overlay (`#agyStringingCanvas`) with an unobtrusive muted slate dashed outline tagged `"Letto · Ignorato"`, while genuine unacknowledged threats retain high-visibility solid amber/red borders.
+* **Calibrated Sensitivity Readout & One-Click Reset:**
+  * **Real-Time Percentage Display:** The active threshold is mapped to an intuitive percentage readout (e.g. `Sensibilità calib.: 39% (soglia 0.76)` or `23% (soglia 0.85 · ridotta)`) shown both in the control dashboard and the camera HUD badge.
+  * **Sensitivity Restoration:** Clicking *"Ripristina sensibilità"* immediately resets any accumulated recalibration backoff back to the base preset (`high`: 83%, `balanced`: 59%, `low`: 39%, `ultra_low`: 23%).
 * **Context-Aware Sustained Confirmation & Dual-Path Auto-Pause:** Suspends detection during `homing`/`heating`/`preparing` states and requires sustained confirmation (`high`: 0.50, 3.2 s; `balanced`: 0.62, 4.8 s; `low`: 0.74, 6.5 s; post-recalibration `ultra_low`: 0.82, 8.5 s) before triggering an immediate race-checked pause:
   * **Primary Path:** Queries Moonraker `print_stats` / `pause_resume` and executes `POST http://<printer-ip>:7125/printer/print/pause` (`gcode_macro PAUSE` retract + safe Z park).
   * **UI Fallback Path:** Emits `{"method":"set","params":{"pause":1}}` over Creality's native WebSocket (`ws://<printer-ip>:9999`) if Moonraker returns an unreachable state.
@@ -409,12 +416,12 @@ The v1.1.0 update reorganizes the in-app control panel (`#aiPanel` in [`upscale.
 |  RILEVAMENTO STRINGING (AI)                     |  HDR Ombre:  [=======|------] 25%               |
 |  [X] Protezione Stringing AI (Indipendente)    |  Nitidezza:  [====|---------] 35%               |
 |  [X] Pausa automatica stampa alla conferma      |  Intensita:  [==========|---] 85%               |
-|  [Sensibilita: Bilanciata (4.5s)             v] |  Contrasto & Luminosita                         |
-|  Stato | Rischio | Conferma | Analisi           |                                                 |
-|  [ Ricalibra scena ]                            |  QUALITA & FLUIDITA                             |
-|                                                 |  Input: 640x360      Output: 1080p FHD          |
-|                                                 |  [X] Smussamento dissolvenza tra frame          |
-|                                                 |  [Frequenza display: Auto                    v] |
+|  [Sensibilita: Conservativa (7.0s)          v]  |  Contrasto & Luminosita                         |
+|  Sensibilita calib.: 39% (soglia 0.76)         |                                                 |
+|  Difetti ignorati: 2                           |  QUALITA & FLUIDITA                             |
+|  Stato | Rischio | Conferma | Analisi           |  Input: 640x360      Output: 1080p FHD          |
+|  [ Segna letti & Ignora ] [ Ripristina sens. ] |  [X] Smussamento dissolvenza tra frame          |
+|  [ Ricalibra scena ]     [ Svuota ignorati ]   |  [Frequenza display: Auto                    v] |
 |                                                 |  [ Ripristina predefiniti ]                     |
 +-------------------------------------------------+-------------------------------------------------+
 ```
@@ -423,10 +430,10 @@ The v1.1.0 update reorganizes the in-app control panel (`#aiPanel` in [`upscale.
 * **Responsive Breakpoint:** Under window widths $\le 680\,\text{px}$, a CSS media query seamlessly collapses the grid into a single column to prevent horizontal overflow.
 * **Dynamic Conditional Control Visibility:**
   * When the **Video Upscaler** is toggled off (`settings.enabled = false`), the adjustable parameter sections (*Prestazioni Video & FPS*, *Parametri Immagine*, *Qualità & Fluidità*) automatically collapse and hide, leaving a clean, low-profile message and preventing UI clutter.
-  * When the **Stringing AI Watchdog** is toggled off (`settings.stringingEnabled = false`), its secondary controls (*Pausa automatica*, *Sensibilità rilevamento*, live metrics grid, and *Ricalibra scena*) automatically collapse and hide.
+  * When the **Stringing AI Watchdog** is toggled off (`settings.stringingEnabled = false`), its secondary controls (*Pausa automatica*, *Sensibilità rilevamento*, calibrated percentage readout, defect counters, and action buttons) automatically collapse and hide.
 * **Independent Telemetry Badges:**
   * Top-Right Badge (`#aiBadge`): Dedicated to Video Upscaler status (`AI · 30.0 fps`, `Upscaler disattivo`, or `Upscaler offline`).
-  * Top-Left Badge (`#agyStringingHost`): Dedicated to Stringing Watchdog status (`Stringing AI · Attiva`, `Sospetto stringing 65%`, `Stampa in pausa · Stringing 91%`, or `Stringing AI · Off`).
+  * Top-Left Badge (`#agyStringingHost`): Dedicated to Stringing Watchdog status (`Stringing AI · Attiva`, `Sospetto stringing 65%`, `Stampa in pausa · Stringing 91%`, or `Stringing AI · Off`), displaying the calibrated sensitivity percentage (`39% · soglia 0.76`) and count of ignored defects when active.
 
 ### 3. Redesigned Extrusion Activity & Full-Width Project Telemetry Strip
 

@@ -38,12 +38,21 @@ ANALYZE_WIDTH = 448
 # Tuned specifically so textured PEI bed glare / minor shimmer never triggers
 # false positives while genuine growing stringing and spaghetti do.
 SENSITIVITY_PRESETS: Dict[str, Tuple[float, float]] = {
-    "ultra_low": (0.82, 8.5),  # Post-recalibration step-down below Conservativa
-    "low": (0.74, 6.5),        # Conservativa
-    "balanced": (0.62, 4.8),   # Bilanciata (default)
-    "high": (0.50, 3.2),       # Sensibile
+    "ultra_low": (0.85, 9.0),  # Post-recalibration step-down (~23% sensibilità)
+    "low": (0.76, 7.0),        # Conservativa (~39% sensibilità, zero falsi allarmi)
+    "balanced": (0.65, 5.2),   # Bilanciata (~59% sensibilità, default)
+    "high": (0.52, 3.5),       # Sensibile (~83% sensibilità)
 }
 SENSITIVITY_ORDER = ("high", "balanced", "low", "ultra_low")
+
+
+def threshold_to_sensitivity_pct(thr: float) -> int:
+    """
+    Map internal detection threshold (0.45..0.92) to a human-readable sensitivity % (90%..10%).
+    Lower threshold = higher sensitivity.
+    """
+    pct = (0.92 - float(thr)) / (0.92 - 0.48) * 80.0 + 10.0
+    return max(5, min(95, int(round(pct))))
 _BASE_ENV_KERNEL = np.ones((5, 5), dtype=np.uint8)
 _BACKOFF_ENV_KERNEL = np.ones((7, 7), dtype=np.uint8)
 _CAND_DILATE_KERNEL = np.ones((11, 11), dtype=np.uint8)
@@ -130,11 +139,13 @@ class StringingConfig:
         return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["balanced"])[1]
 
     def to_dict(self) -> Dict[str, Any]:
+        base_thr = self.resolved_threshold(0)
         return {
             "enabled": self.enabled,
             "auto_pause": self.auto_pause,
             "sensitivity": self.sensitivity,
-            "threshold": round(self.resolved_threshold(0), 2),
+            "sensitivity_pct": threshold_to_sensitivity_pct(base_thr),
+            "threshold": round(base_thr, 2),
             "confirm_seconds": round(self.resolved_confirm_seconds(0), 1),
             "cooldown_seconds": round(self.cooldown_seconds, 1),
         }
@@ -179,6 +190,7 @@ class _IpSession:
     paused_by_ai: bool = False
     last_printer_state: str = ""
     last_regions: List[Dict[str, Any]] = field(default_factory=list)
+    ignored_defects: List[Dict[str, Any]] = field(default_factory=list)
     alert_info: Optional[Dict[str, Any]] = None
     alert_snapshot_jpeg: Optional[bytes] = None
     latest_annotated_jpeg: Optional[bytes] = None
@@ -191,15 +203,15 @@ def _compute_roi_mask(h: int, w: int) -> np.ndarray:
     and corner regions occupied by Creality Print native UI overlays (#aiBadge, .videoStatus).
     """
     mask = np.ones((h, w), dtype=np.float32)
-    top = max(8, int(round(h * 0.08)))
-    bot = max(8, int(round(h * 0.08)))
+    top = max(14, int(round(h * 0.12)))
+    bot = max(10, int(round(h * 0.08)))
     side = max(8, int(round(w * 0.04)))
     mask[:top, :] = 0.0
     mask[h - bot :, :] = 0.0
     mask[:, :side] = 0.0
     mask[:, w - side :] = 0.0
     # Top-right overlay corner (#aiBadge + Creality icons) & top-left status pill
-    mask[: int(round(h * 0.16)), int(round(w * 0.72)) :] = 0.0
+    mask[: int(round(h * 0.16)), int(round(w * 0.70)) :] = 0.0
     mask[: int(round(h * 0.14)), : int(round(w * 0.28))] = 0.0
     return mask
 
@@ -330,34 +342,100 @@ def _compute_symmetrical_filament_map(rgb: np.ndarray) -> Tuple[np.ndarray, np.n
     return full_map, full_orient, sobel_mag, l_chan
 
 
+def _matches_ignored(box: Dict[str, Any], ignored_list: List[Dict[str, Any]], iou_thr: float = 0.14) -> Optional[Dict[str, Any]]:
+    """
+    Check whether candidate box matches an acknowledged/ignored defect footprint
+    by spatial overlap (IoU) or bounding-box / centroid proximity.
+    """
+    if not ignored_list:
+        return None
+    bx = float(box["x"])
+    by = float(box["y"])
+    bw = float(box["w"])
+    bh = float(box["h"])
+    bx2 = bx + bw
+    by2 = by + bh
+    bcx = bx + bw * 0.5
+    bcy = by + bh * 0.5
+
+    for ign in ignored_list:
+        ix = float(ign["x"])
+        iy = float(ign["y"])
+        iw_box = float(ign["w"])
+        ih_box = float(ign["h"])
+        ix2 = ix + iw_box
+        iy2 = iy + ih_box
+
+        # Intersection over union
+        inter_x1 = max(bx, ix)
+        inter_y1 = max(by, iy)
+        inter_x2 = min(bx2, ix2)
+        inter_y2 = min(by2, iy2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        union_area = (bw * bh) + (iw_box * ih_box) - inter_area
+        if union_area > 0 and (inter_area / union_area) >= iou_thr:
+            return ign
+
+        # Check if candidate center falls inside the ignored box (with margin for camera flutter)
+        pad_x = max(0.035, iw_box * 0.20)
+        pad_y = max(0.035, ih_box * 0.20)
+        if (ix - pad_x) <= bcx <= (ix2 + pad_x) and (iy - pad_y) <= bcy <= (iy2 + pad_y):
+            return ign
+
+        # Centroid distance tolerance
+        icx = float(ign.get("cx", ix + iw_box * 0.5))
+        icy = float(ign.get("cy", iy + ih_box * 0.5))
+        dist = math.hypot(bcx - icx, bcy - icy)
+        tol_rad = max(0.065, float(ign.get("radius", 0.08)) * 1.05)
+        if dist <= tol_rad:
+            return ign
+
+    return None
+
+
 def _merge_boxes(boxes: List[Dict[str, Any]], iou_thr: float = 0.22) -> List[Dict[str, Any]]:
-    """Greedily merge overlapping spatial candidate tiles into clean HUD boxes."""
+    """Greedily merge overlapping spatial candidate tiles into clean HUD boxes, keeping active and ignored separate."""
     if not boxes:
         return []
-    ordered = sorted(boxes, key=lambda b: b["score"], reverse=True)
-    merged: List[Dict[str, Any]] = []
-    for box in ordered:
-        bx1, by1, bx2, by2 = box["x"], box["y"], box["x"] + box["w"], box["y"] + box["h"]
-        absorbed = False
-        for m in merged:
-            mx1, my1, mx2, my2 = m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"]
-            ix1, iy1 = max(bx1, mx1), max(by1, my1)
-            ix2, iy2 = min(bx2, mx2), min(by2, my2)
-            iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-            inter = iw * ih
-            union = (bx2 - bx1) * (by2 - by1) + (mx2 - mx1) * (my2 - my1) - inter
-            if union > 0 and (inter / union) >= iou_thr:
-                nx1, ny1 = min(bx1, mx1), min(by1, my1)
-                nx2, ny2 = max(bx2, mx2), max(by2, my2)
-                m["x"], m["y"] = round(nx1, 4), round(ny1, 4)
-                m["w"], m["h"] = round(nx2 - nx1, 4), round(ny2 - ny1, 4)
-                m["score"] = round(max(m["score"], box["score"]), 3)
-                m["strands"] = max(m["strands"], box["strands"])
-                absorbed = True
-                break
-        if not absorbed and len(merged) < 6:
-            merged.append(dict(box))
-    return merged
+
+    active = [b for b in boxes if not b.get("ignored")]
+    ignored = [b for b in boxes if b.get("ignored")]
+
+    def _merge_group(group: List[Dict[str, Any]], max_out: int = 6) -> List[Dict[str, Any]]:
+        if not group:
+            return []
+        ordered = sorted(group, key=lambda b: b.get("score", 0.0), reverse=True)
+        merged: List[Dict[str, Any]] = []
+        for box in ordered:
+            bx1, by1, bx2, by2 = box["x"], box["y"], box["x"] + box["w"], box["y"] + box["h"]
+            absorbed = False
+            for m in merged:
+                mx1, my1, mx2, my2 = m["x"], m["y"], m["x"] + m["w"], m["y"] + m["h"]
+                ix1, iy1 = max(bx1, mx1), max(by1, my1)
+                ix2, iy2 = min(bx2, mx2), min(by2, my2)
+                iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+                inter = iw * ih
+                union = (bx2 - bx1) * (by2 - by1) + (mx2 - mx1) * (my2 - my1) - inter
+                if union > 0 and (inter / union) >= iou_thr:
+                    nx1, ny1 = min(bx1, mx1), min(by1, my1)
+                    nx2, ny2 = max(bx2, mx2), max(by2, my2)
+                    m["x"], m["y"] = round(nx1, 4), round(ny1, 4)
+                    m["w"], m["h"] = round(nx2 - nx1, 4), round(ny2 - ny1, 4)
+                    m["score"] = round(max(m["score"], box["score"]), 3)
+                    m["strands"] = max(m.get("strands", 0), box.get("strands", 0))
+                    if box.get("ignored"):
+                        m["ignored"] = True
+                        if box.get("defect_id"):
+                            m["defect_id"] = box["defect_id"]
+                    absorbed = True
+                    break
+            if not absorbed and len(merged) < max_out:
+                merged.append(dict(box))
+        return merged
+
+    return _merge_group(active, max_out=6) + _merge_group(ignored, max_out=6)
 
 
 def _render_evidence_jpeg(rgb: np.ndarray, regions: List[Dict[str, Any]], score: float, label: str) -> bytes:
@@ -369,10 +447,16 @@ def _render_evidence_jpeg(rgb: np.ndarray, regions: List[Dict[str, Any]], score:
         y1 = max(0, int(round(r["y"] * h)))
         x2 = min(w - 1, int(round((r["x"] + r["w"]) * w)))
         y2 = min(h - 1, int(round((r["y"] + r["h"]) * h)))
-        col = (60, 68, 239) if r["score"] >= 0.55 else (36, 191, 251)
-        cv2.rectangle(bgr, (x1, y1), (x2, y2), col, 2)
-        tag = f"Stringing {int(round(r['score'] * 100))}%"
-        cv2.putText(bgr, tag, (x1 + 4, max(16, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, col, 1, cv2.LINE_AA)
+        if r.get("ignored"):
+            col = (140, 140, 140)
+            cv2.rectangle(bgr, (x1, y1), (x2, y2), col, 1)
+            tag = "Letto - Ignorato"
+            cv2.putText(bgr, tag, (x1 + 4, max(14, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1, cv2.LINE_AA)
+        else:
+            col = (60, 68, 239) if r["score"] >= 0.55 else (36, 191, 251)
+            cv2.rectangle(bgr, (x1, y1), (x2, y2), col, 2)
+            tag = f"Stringing {int(round(r['score'] * 100))}%"
+            cv2.putText(bgr, tag, (x1 + 4, max(16, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, col, 1, cv2.LINE_AA)
 
     banner = f"AI Vision | {label} | Score {int(round(score * 100))}%"
     cv2.rectangle(bgr, (0, h - 26), (w, h), (18, 18, 22), -1)
@@ -467,7 +551,7 @@ class StringingWatchdog:
                 self.config.cooldown_seconds = max(5.0, min(180.0, float(data["cooldown_seconds"])))
             return self.config.to_dict()
 
-    def reset_baseline(self, ip: Optional[str] = None, clear_alert: bool = True, step_down: bool = True, now: Optional[float] = None) -> Dict[str, Any]:
+    def reset_baseline(self, ip: Optional[str] = None, clear_alert: bool = True, step_down: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
         sess = self._get_session(ip)
         cur_time = time.time() if now is None else float(now)
         with self._cfg_lock:
@@ -502,6 +586,98 @@ class StringingWatchdog:
                 sess.alert_info = None
                 sess.alert_snapshot_jpeg = None
             return self._build_status_locked(sess, cfg, cur_time=cur_time)
+
+    def acknowledge_defects(self, ip: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Mark all currently active stringing regions as acknowledged/ignored defects.
+        Subsequent detections within these regions will be suppressed from scoring
+        WITHOUT lowering the sensitivity of the rest of the build plate.
+        """
+        sess = self._get_session(ip)
+        cur_time = time.time() if now is None else float(now)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
+        with sess.lock:
+            candidates: List[Dict[str, Any]] = []
+            for r in sess.last_regions:
+                if not r.get("ignored"):
+                    candidates.append(r)
+            if not candidates and sess.alert_info and sess.alert_info.get("regions"):
+                for r in sess.alert_info["regions"]:
+                    if not r.get("ignored"):
+                        candidates.append(r)
+
+            for cand in candidates:
+                already_covered = False
+                for existing in sess.ignored_defects:
+                    e_x1 = max(float(cand["x"]), float(existing["x"]))
+                    e_y1 = max(float(cand["y"]), float(existing["y"]))
+                    e_x2 = min(float(cand["x"]) + float(cand["w"]), float(existing["x"]) + float(existing["w"]))
+                    e_y2 = min(float(cand["y"]) + float(cand["h"]), float(existing["y"]) + float(existing["h"]))
+                    iw = max(0.0, e_x2 - e_x1)
+                    ih = max(0.0, e_y2 - e_y1)
+                    inter = iw * ih
+                    union = (float(cand["w"]) * float(cand["h"])) + (float(existing["w"]) * float(existing["h"])) - inter
+                    if union > 0 and (inter / union) >= 0.60:
+                        already_covered = True
+                        break
+
+                if not already_covered:
+                    idx = len(sess.ignored_defects) + 1
+                    cw = float(cand.get("w", 0.12))
+                    ch = float(cand.get("h", 0.12))
+                    cx = float(cand.get("x", 0.0)) + cw * 0.5
+                    cy = float(cand.get("y", 0.0)) + ch * 0.5
+                    sess.ignored_defects.append(
+                        {
+                            "id": f"DEF-{idx}",
+                            "x": round(float(cand.get("x", 0.0)), 4),
+                            "y": round(float(cand.get("y", 0.0)), 4),
+                            "w": round(cw, 4),
+                            "h": round(ch, 4),
+                            "cx": round(cx, 4),
+                            "cy": round(cy, 4),
+                            "radius": round(math.hypot(cw, ch) * 0.5, 4),
+                            "score": round(float(cand.get("score", 0.0)), 3),
+                            "strands": int(cand.get("strands", 1)),
+                            "acknowledged_at": round(cur_time, 2),
+                        }
+                    )
+
+            for r in sess.last_regions:
+                r["ignored"] = True
+
+            sess.streak_sec = 0.0
+            sess.ema_score = 0.0
+            sess.last_raw_score = 0.0
+            sess.paused_by_ai = False
+            sess.alert_info = None
+            sess.alert_snapshot_jpeg = None
+            sess.cooldown_until = cur_time + 4.0
+            sess.ai_state = "monitoring"
+            return self._build_status_locked(sess, cfg, cur_time=cur_time)
+
+    def reset_sensitivity(self, ip: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Restore original sensitivity preset by clearing backoff level back to 0.
+        """
+        sess = self._get_session(ip)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
+        with sess.lock:
+            sess.backoff_level = 0
+            return self._build_status_locked(sess, cfg)
+
+    def clear_ignored_defects(self, ip: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Clear the list of acknowledged/ignored defect zones.
+        """
+        sess = self._get_session(ip)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
+        with sess.lock:
+            sess.ignored_defects.clear()
+            return self._build_status_locked(sess, cfg)
 
     def get_status(self, ip: Optional[str] = None) -> Dict[str, Any]:
         sess = self._get_session(ip)
@@ -694,9 +870,13 @@ class StringingWatchdog:
         if ctx and ctx.feature_category == "infill" and ctx.is_extruding:
             infill_penalty = 0.08
 
-        for y0 in range(0, sh - tile_h + 1, step_y):
+        top_crop = max(14, int(round(sh * 0.12)))
+        bot_crop = max(10, int(round(sh * 0.08)))
+        side_crop = max(8, int(round(sw * 0.04)))
+
+        for y0 in range(top_crop, sh - bot_crop - tile_h + 1, step_y):
             y1 = y0 + tile_h
-            for x0 in range(0, sw - tile_w + 1, step_x):
+            for x0 in range(side_crop, sw - side_crop - tile_w + 1, step_x):
                 x1 = x0 + tile_w
                 t_valid = valid[y0:y1, x0:x1]
                 if t_valid.mean() < 0.45:
@@ -766,40 +946,59 @@ class StringingWatchdog:
                 )
 
                 # Textured PEI plate / granular surface suppression:
-                # Bare PEI sheets have high background carpet ridge (med >= 7.0) with sparse
-                # contrast peaks and almost zero macro appearance change vs baseline.
+                macro_delta_strand = float(t_mdiff[t_thin > 0].mean())
                 tile_fmap_med = float(np.median(t_raw_fmap))
                 tile_fmap_p75 = float(np.percentile(t_raw_fmap, 75))
-                if tile_fmap_med >= 7.0:
+
+                # If virtually no macro appearance change from baseline, reject specular sparkle
+                if macro_delta_strand < 7.5:
+                    score *= 0.30
+                elif macro_delta_strand < 12.0 and max_diag < 28.0:
+                    score *= 0.45
+
+                if tile_fmap_med >= 6.5:
                     peak_over_carpet = p85_ridge_on_strand / (tile_fmap_p75 + 4.0)
-                    macro_delta_strand = float(t_mdiff[t_thin > 0].mean())
-                    if macro_delta_strand < 9.0 and (peak_over_carpet < 1.35 or max_diag < 26.0):
+                    if macro_delta_strand < 11.0 and (peak_over_carpet < 1.45 or max_diag < 28.0):
                         score *= 0.28
-                    elif tile_fmap_med >= 10.5 and macro_delta_strand < 12.0 and peak_over_carpet < 1.6:
+                    elif tile_fmap_med >= 9.5 and macro_delta_strand < 14.0 and peak_over_carpet < 1.65:
+                        score *= 0.38
+
+                # Active extrusion support/infill regular pattern gating
+                if ctx and ctx.is_extruding and ctx.feature_category in ("infill", "support"):
+                    if entropy < 0.44:
                         score *= 0.42
 
                 # Gate out isolated weak lines or pure high-gradient solid textures
-                if edge_purity < 0.26 or (strand_count < 2 and span_sum < 40.0):
+                if edge_purity < 0.28 or (strand_count < 2 and span_sum < 48.0):
                     score *= 0.45
                 if quads_hit < 2 and strand_count < 2:
-                    score *= 0.65
+                    score *= 0.60
+                if max_diag < 18.0 and span_sum < 42.0:
+                    score *= 0.35
 
                 score = max(0.0, min(1.0, score))
-                tile_scores.append(score)
 
-                if score >= box_min_score:
-                    for cid in present_cids:
-                        detected_cid_set.add(int(cid))
-                    raw_boxes.append(
-                        {
-                            "x": round(x0 / float(sw), 4),
-                            "y": round(y0 / float(sh), 4),
-                            "w": round(tile_w / float(sw), 4),
-                            "h": round(tile_h / float(sh), 4),
-                            "score": round(score, 3),
-                            "strands": strand_count,
-                        }
-                    )
+                cand_box = {
+                    "x": round(x0 / float(sw), 4),
+                    "y": round(y0 / float(sh), 4),
+                    "w": round(tile_w / float(sw), 4),
+                    "h": round(tile_h / float(sh), 4),
+                    "score": round(score, 3),
+                    "strands": strand_count,
+                }
+                matched_ign = _matches_ignored(cand_box, sess.ignored_defects)
+                if matched_ign is not None:
+                    # Matched an acknowledged/ignored defect footprint: exclude from frame score
+                    cand_box["ignored"] = True
+                    cand_box["defect_id"] = matched_ign.get("id", "DEF")
+                    raw_boxes.append(cand_box)
+                else:
+                    cand_box["ignored"] = False
+                    tile_scores.append(score)
+                    if score >= box_min_score:
+                        for cid in present_cids:
+                            detected_cid_set.add(int(cid))
+                        raw_boxes.append(cand_box)
 
         total_strands = len(detected_cid_set)
 
@@ -831,6 +1030,10 @@ class StringingWatchdog:
     def _build_status_locked(self, sess: _IpSession, cfg: StringingConfig, cur_time: Optional[float] = None) -> Dict[str, Any]:
         confirm_s = cfg.resolved_confirm_seconds(sess.backoff_level)
         eff_sens = cfg.effective_sensitivity(sess.backoff_level)
+        eff_thr = cfg.resolved_threshold(sess.backoff_level)
+        base_thr = cfg.resolved_threshold(0)
+        sens_pct = threshold_to_sensitivity_pct(eff_thr)
+        base_sens_pct = threshold_to_sensitivity_pct(base_thr)
         confirm_pct = min(1.0, max(0.0, sess.streak_sec / confirm_s)) if confirm_s > 0 else 0.0
         now_sec = time.time() if cur_time is None else float(cur_time)
         return {
@@ -840,8 +1043,11 @@ class StringingWatchdog:
             "auto_pause": cfg.auto_pause,
             "sensitivity": cfg.sensitivity,
             "effective_sensitivity": eff_sens,
+            "sensitivity_pct": sens_pct,
+            "base_sensitivity_pct": base_sens_pct,
             "backoff_level": int(sess.backoff_level),
-            "threshold": round(cfg.resolved_threshold(sess.backoff_level), 2),
+            "threshold": round(eff_thr, 2),
+            "base_threshold": round(base_thr, 2),
             "confirm_seconds": round(confirm_s, 1),
             "ai_state": sess.ai_state,
             "score": round(sess.last_raw_score, 3),
@@ -850,6 +1056,8 @@ class StringingWatchdog:
             "streak_sec": round(sess.streak_sec, 2),
             "confirm_pct": round(confirm_pct, 3),
             "regions": list(sess.last_regions),
+            "ignored_count": len(sess.ignored_defects),
+            "ignored_defects": list(sess.ignored_defects),
             "frames_analyzed": sess.frames_analyzed,
             "avg_infer_ms": round(sess.avg_infer_ms, 1),
             "calibration_left": sess.calibration_left,
@@ -904,6 +1112,7 @@ class StringingWatchdog:
             if sess.last_printer_state in ("paused", "standby", "idle", "complete") and printer_state == "printing":
                 if sess.last_printer_state in ("standby", "idle", "complete"):
                     sess.backoff_level = 0
+                    sess.ignored_defects.clear()
                 elif sess.paused_by_ai or sess.alert_info is not None or sess.streak_sec > 0.2:
                     sess.backoff_level = min(2, sess.backoff_level + 1)
                 sess.bg_ridge = None
@@ -965,7 +1174,7 @@ class StringingWatchdog:
                     sess.streak_sec = max(0.0, sess.streak_sec - dt * 0.35)
                     sess.ai_state = "warning" if sess.streak_sec > 0.4 else "monitoring"
                 else:
-                    sess.streak_sec = max(0.0, sess.streak_sec - dt * 1.5)
+                    sess.streak_sec = max(0.0, sess.streak_sec - dt * 2.2)
                     sess.ai_state = "monitoring"
 
                 if regions and frame_score >= max(0.46, eff_thr * 0.75):
