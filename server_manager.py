@@ -270,6 +270,11 @@ class AIServerSupervisor:
             uptime_sec = max(0.0, time.time() - started_at)
 
         ai_pid = (port_status or {}).get("pid") or child_pid
+        has_full_gpu = bool(
+            caps["has_full_gpu"]
+            or resolved_mode == "full_gpu"
+            or (port_status and port_status.get("gpu_upscaler"))
+        )
 
         return {
             "ok": True,
@@ -287,7 +292,7 @@ class AIServerSupervisor:
             "uptime_sec": round(uptime_sec, 1),
             "has_venv": caps["has_venv"],
             "has_onnx_model": caps["has_onnx_model"],
-            "has_full_gpu": caps["has_full_gpu"],
+            "has_full_gpu": has_full_gpu,
             "can_stringing_ai": caps["can_stringing_ai"],
             "last_error": last_error,
             "exit_code": last_exit_code,

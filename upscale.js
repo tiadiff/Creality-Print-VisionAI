@@ -495,7 +495,7 @@
             const ctrl = new AbortController();
             const tid = setTimeout(() => ctrl.abort(), 1400);
             try {
-                const r = await fetch(`${CTRL_URL}/control/status`, { signal: ctrl.signal });
+                const r = await fetch(`${CTRL_URL}/control/status${force ? "?refresh=1" : ""}`, { signal: ctrl.signal });
                 if (r.ok) {
                     const j = await r.json();
                     serverControlOnline = Boolean(j && j.supervisor_online);
@@ -642,7 +642,14 @@
             modeEl.textContent = modeLabels[st.ai_mode] || st.ai_mode || "-";
             pidEl.textContent = st.ai_pid ? `PID ${st.ai_pid}` : (running ? ":8088" : "-");
             upEl.textContent = running ? formatUptimeSec(st.uptime_sec) : "-";
-            capsEl.textContent = st.has_full_gpu
+            const hasFullGpu = Boolean(
+                st && (
+                    st.has_full_gpu ||
+                    st.ai_mode === "full_gpu" ||
+                    (st.port_8088_status && (st.port_8088_status.gpu_upscaler || st.port_8088_status.mode === "full_gpu"))
+                )
+            );
+            capsEl.textContent = hasFullGpu
                 ? "GPU DirectML + Stringing"
                 : (st.can_stringing_ai ? "Solo CPU (no .venv GPU)" : "Dipendenze mancanti");
         } else {
@@ -654,7 +661,14 @@
 
         if (selEl) {
             const gpuOpt = selEl.querySelector('option[value="full_gpu"]');
-            if (gpuOpt) gpuOpt.disabled = Boolean(st && st.has_full_gpu === false);
+            const hasFullGpu = Boolean(
+                st && (
+                    st.has_full_gpu ||
+                    st.ai_mode === "full_gpu" ||
+                    (st.port_8088_status && (st.port_8088_status.gpu_upscaler || st.port_8088_status.mode === "full_gpu"))
+                )
+            );
+            if (gpuOpt) gpuOpt.disabled = !hasFullGpu;
             selEl.disabled = serverControlBusy || !supOn;
         }
 
@@ -1085,91 +1099,104 @@
 
                         <div class="ai-section">Rilevamento Stringing (AI)</div>
                         <div class="ai-hdr">
-                            <div class="ai-switch-row" style="margin-bottom:10px">
+                            <div class="ai-switch-row" style="margin-bottom:8px">
                                 <div><span style="color:#f2f2f4;font-weight:600">Protezione Stringing AI</span><small>Attiva indipendentemente dall'upscaler</small></div>
                                 <input type="checkbox" class="ai-switch" id="strToggle" ${settings.stringingEnabled ? "checked" : ""}>
                             </div>
-                            <div class="ai-switch-row" style="margin-bottom:10px">
-                                <div>Pausa automatica stampa<small>Invia PAUSA immediata alla conferma</small></div>
-                                <input type="checkbox" class="ai-switch" id="strAutoPauseToggle" ${settings.stringingAutoPause ? "checked" : ""}>
+                            <div id="strControlsWrap" style="${settings.stringingEnabled ? "" : "display:none"}">
+                                <div class="ai-switch-row" style="margin-bottom:10px">
+                                    <div>Pausa automatica stampa<small>Invia PAUSA immediata alla conferma</small></div>
+                                    <input type="checkbox" class="ai-switch" id="strAutoPauseToggle" ${settings.stringingAutoPause ? "checked" : ""}>
+                                </div>
+                                <div class="ai-label">Sensibilit&agrave; rilevamento</div>
+                                <select id="strSensSelect" class="ai-select" style="margin-bottom:8px">
+                                    <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; 6.5s)</option>
+                                    <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; 4.8s)</option>
+                                    <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; 3.2s)</option>
+                                </select>
+                                <div class="ai-stats">
+                                    <div class="ai-stat">Stato<b id="hudStrState">-</b></div>
+                                    <div class="ai-stat">Rischio<b id="hudStrConf">-</b></div>
+                                    <div class="ai-stat">Conferma<b id="hudStrStreak">-</b></div>
+                                    <div class="ai-stat">Analisi<b id="hudStrLat">- ms</b></div>
+                                </div>
+                                <div class="ai-btn-row">
+                                    <button class="ai-btn" id="btnStrReset">Ricalibra scena</button>
+                                </div>
                             </div>
-                            <div class="ai-label">Sensibilit&agrave; rilevamento</div>
-                            <select id="strSensSelect" class="ai-select" style="margin-bottom:8px">
-                                <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; 6.5s)</option>
-                                <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; 4.8s)</option>
-                                <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; 3.2s)</option>
-                            </select>
-                            <div class="ai-stats">
-                                <div class="ai-stat">Stato<b id="hudStrState">-</b></div>
-                                <div class="ai-stat">Rischio<b id="hudStrConf">-</b></div>
-                                <div class="ai-stat">Conferma<b id="hudStrStreak">-</b></div>
-                                <div class="ai-stat">Analisi<b id="hudStrLat">- ms</b></div>
-                            </div>
-                            <div class="ai-btn-row">
-                                <button class="ai-btn" id="btnStrReset">Ricalibra scena</button>
+                            <div id="strDisabledMsg" style="color:#8e8e93;font-size:11px;margin-top:4px;${settings.stringingEnabled ? "display:none" : ""}">
+                                Protezione disattivata. Attiva l'interruttore sopra per monitorare lo stringing e abilitare la pausa automatica.
                             </div>
                         </div>
                     </div>
 
                     <div class="ai-col">
-                        <div class="ai-section" style="margin-top:0">Prestazioni Video &amp; FPS</div>
-                        <div class="ai-stats" style="margin-bottom:12px">
-                            <div class="ai-stat">Camera<b id="hudSrcFps">${srcFps} fps</b></div>
-                            <div class="ai-stat">AI<b id="hudAiFps">${aiFps} fps</b></div>
-                            <div class="ai-stat">GPU / totale<b id="hudLat">- ms</b></div>
-                            <div class="ai-stat">Display<b id="hudDisplayFps">${displayFps} fps</b></div>
-                            <div class="ai-stat" style="grid-column:span 2">Limite attuale fps AI<b id="hudLimit">-</b></div>
-                        </div>
-
-                        <div class="ai-section">Parametri Immagine</div>
-                        <div class="ai-hdr" style="margin-bottom:10px">
-                            <div class="ai-row-head" style="margin-bottom:4px">
-                                <span style="color:#f2f2f4;font-weight:600">HDR ombre</span>
-                                <span class="ai-num"><input type="number" id="num_hdr" min="0" max="100" step="1" value="${pct(settings.hdrShadows)}">%</span>
+                        <div id="upscaleControlsWrap" style="${settings.enabled ? "" : "display:none"}">
+                            <div class="ai-section" style="margin-top:0">Prestazioni Video &amp; FPS</div>
+                            <div class="ai-stats" style="margin-bottom:12px">
+                                <div class="ai-stat">Camera<b id="hudSrcFps">${srcFps} fps</b></div>
+                                <div class="ai-stat">AI<b id="hudAiFps">${aiFps} fps</b></div>
+                                <div class="ai-stat">GPU / totale<b id="hudLat">- ms</b></div>
+                                <div class="ai-stat">Display<b id="hudDisplayFps">${displayFps} fps</b></div>
+                                <div class="ai-stat" style="grid-column:span 2">Limite attuale fps AI<b id="hudLimit">-</b></div>
                             </div>
-                            <p class="ai-hdr-note" style="margin:0 0 6px">Schiarisce i neri (PLA scuro) senza bruciare le luci.</p>
-                            <input type="range" class="ai-range" id="slider_hdr" min="0" max="100" step="1" value="${pct(settings.hdrShadows)}" style="--v:${pct(settings.hdrShadows)}%">
-                        </div>
-                        ${slider("sharp", "Nitidezza", pct(settings.sharpness))}
-                        ${slider("blend", "Intensit&agrave; AI", pct(settings.aiBlend))}
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-                            <div>${slider("clarity", "Contrasto", pct(settings.clarity))}</div>
-                            <div>${slider("bright", "Luminosit&agrave;", pct(settings.brightness + 0.5))}</div>
-                        </div>
 
-                        <div class="ai-section">Qualit&agrave; &amp; Fluidit&agrave;</div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:6px">
-                            <div>
-                                <div class="ai-label">Input AI</div>
-                                <select id="inputSelect" class="ai-select" style="margin-bottom:6px">
-                                    <option value="480" ${sel("480", settings.aiInput)}>480 &times; 270</option>
-                                    <option value="640" ${sel("640", settings.aiInput)}>640 &times; 360</option>
-                                    <option value="960" ${sel("960", settings.aiInput)}>960 &times; 540</option>
-                                </select>
+                            <div class="ai-section">Parametri Immagine</div>
+                            <div class="ai-hdr" style="margin-bottom:10px">
+                                <div class="ai-row-head" style="margin-bottom:4px">
+                                    <span style="color:#f2f2f4;font-weight:600">HDR ombre</span>
+                                    <span class="ai-num"><input type="number" id="num_hdr" min="0" max="100" step="1" value="${pct(settings.hdrShadows)}">%</span>
+                                </div>
+                                <p class="ai-hdr-note" style="margin:0 0 6px">Schiarisce i neri (PLA scuro) senza bruciare le luci.</p>
+                                <input type="range" class="ai-range" id="slider_hdr" min="0" max="100" step="1" value="${pct(settings.hdrShadows)}" style="--v:${pct(settings.hdrShadows)}%">
                             </div>
-                            <div>
-                                <div class="ai-label">Output</div>
-                                <select id="resSelect" class="ai-select" style="margin-bottom:6px">
-                                    <option value="720p" ${sel("720p", settings.outRes)}>720p HD</option>
-                                    <option value="1080p" ${sel("1080p", settings.outRes)}>1080p FHD</option>
-                                    <option value="1440p" ${sel("1440p", settings.outRes)}>1440p QHD</option>
-                                </select>
+                            ${slider("sharp", "Nitidezza", pct(settings.sharpness))}
+                            ${slider("blend", "Intensit&agrave; AI", pct(settings.aiBlend))}
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                                <div>${slider("clarity", "Contrasto", pct(settings.clarity))}</div>
+                                <div>${slider("bright", "Luminosit&agrave;", pct(settings.brightness + 0.5))}</div>
                             </div>
-                        </div>
 
-                        <div class="ai-switch-row" style="margin-bottom:8px">
-                            <div>Smussamento dissolvenza<small>Tra frame AI consecutivi</small></div>
-                            <input type="checkbox" class="ai-switch" id="fgToggle" ${settings.frameGenEnabled ? "checked" : ""}>
-                        </div>
-                        <select id="fpsSelect" class="ai-select" style="margin-bottom:10px">
-                            <option value="auto" ${sel("auto", settings.targetFps)}>Frequenza display (auto)</option>
-                            <option value="60" ${sel("60", settings.targetFps)}>Limita a 60 Hz</option>
-                            <option value="75" ${sel("75", settings.targetFps)}>Limita a 75 Hz</option>
-                            <option value="120" ${sel("120", settings.targetFps)}>Limita a 120 Hz</option>
-                            <option value="144" ${sel("144", settings.targetFps)}>Limita a 144 Hz</option>
-                        </select>
+                            <div class="ai-section">Qualit&agrave; &amp; Fluidit&agrave;</div>
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:6px">
+                                <div>
+                                    <div class="ai-label">Input AI</div>
+                                    <select id="inputSelect" class="ai-select" style="margin-bottom:6px">
+                                        <option value="480" ${sel("480", settings.aiInput)}>480 &times; 270</option>
+                                        <option value="640" ${sel("640", settings.aiInput)}>640 &times; 360</option>
+                                        <option value="960" ${sel("960", settings.aiInput)}>960 &times; 540</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div class="ai-label">Output</div>
+                                    <select id="resSelect" class="ai-select" style="margin-bottom:6px">
+                                        <option value="720p" ${sel("720p", settings.outRes)}>720p HD</option>
+                                        <option value="1080p" ${sel("1080p", settings.outRes)}>1080p FHD</option>
+                                        <option value="1440p" ${sel("1440p", settings.outRes)}>1440p QHD</option>
+                                    </select>
+                                </div>
+                            </div>
 
-                        <button class="ai-btn" id="btnReset" style="margin-top:4px">Ripristina predefiniti</button>
+                            <div class="ai-switch-row" style="margin-bottom:8px">
+                                <div>Smussamento dissolvenza<small>Tra frame AI consecutivi</small></div>
+                                <input type="checkbox" class="ai-switch" id="fgToggle" ${settings.frameGenEnabled ? "checked" : ""}>
+                            </div>
+                            <select id="fpsSelect" class="ai-select" style="margin-bottom:10px">
+                                <option value="auto" ${sel("auto", settings.targetFps)}>Frequenza display (auto)</option>
+                                <option value="60" ${sel("60", settings.targetFps)}>Limita a 60 Hz</option>
+                                <option value="75" ${sel("75", settings.targetFps)}>Limita a 75 Hz</option>
+                                <option value="120" ${sel("120", settings.targetFps)}>Limita a 120 Hz</option>
+                                <option value="144" ${sel("144", settings.targetFps)}>Limita a 144 Hz</option>
+                            </select>
+
+                            <button class="ai-btn" id="btnReset" style="margin-top:4px">Ripristina predefiniti</button>
+                        </div>
+                        <div id="upscaleDisabledMsg" class="ai-hdr" style="padding:26px 16px;text-align:center;color:#8e8e93;font-size:12px;line-height:1.55;${settings.enabled ? "display:none" : ""}">
+                            <div style="font-size:26px;margin-bottom:8px">📺</div>
+                            <b style="color:#f2f2f4;font-size:13px">Upscaler Video Disattivato</b><br>
+                            I parametri di ottimizzazione immagine (HDR ombre, nitidezza, risoluzione e fluidit&agrave;) sono nascosti.<br>
+                            Attiva lo switch <b>Upscaler Video</b> in alto a destra per visualizzarli e modificarli.
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1317,7 +1344,14 @@
             settings.enabled = e.target.checked;
             saveSettings();
             sendConfigToService();
-            if (!settings.enabled) {
+            const wrap = q("#upscaleControlsWrap");
+            const msg = q("#upscaleDisabledMsg");
+            if (wrap) wrap.style.display = settings.enabled ? "" : "none";
+            if (msg) msg.style.display = settings.enabled ? "none" : "";
+            if (settings.enabled) {
+                if (canvas) canvas.style.display = "block";
+                connectAIWebSocket();
+            } else {
                 if (canvas) canvas.style.display = "none";
                 if (activeVideo) activeVideo.style.opacity = "1";
             }
@@ -1327,6 +1361,10 @@
         q("#strToggle").addEventListener("change", (e) => {
             settings.stringingEnabled = e.target.checked;
             saveSettings();
+            const wrap = q("#strControlsWrap");
+            const msg = q("#strDisabledMsg");
+            if (wrap) wrap.style.display = settings.stringingEnabled ? "" : "none";
+            if (msg) msg.style.display = settings.stringingEnabled ? "none" : "";
             pushStringingConfigToService();
             if (!settings.stringingEnabled && stringingCtx && stringingCanvas) {
                 stringingCtx.clearRect(0, 0, stringingCanvas.width, stringingCanvas.height);
@@ -1381,6 +1419,7 @@
     let sliderEl = null;
     let sliderValEl = null;
     let telemetryCardEl = null;
+    let telemetryStripEl = null;
 
     // Live telemetry state (Tier 1: :8088 Moonraker + G-code Range tracker; Tier 2: direct :9999 WS fallback)
     let serviceTelemetry = null;
@@ -1742,7 +1781,7 @@
                 display: flex;
                 flex-direction: column;
                 justify-content: space-between;
-                gap: 6px;
+                gap: 8px;
             }
             .agy-telemetry-row > .agy-telemetry-card {
                 width: 100%;
@@ -1754,14 +1793,6 @@
                 gap: 8px;
                 flex-wrap: nowrap;
             }
-            .agy-tel-title {
-                font-size: 14px;
-                font-weight: 500;
-                color: var(--primary-card-right-value-text-color, #FFFFFF);
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
             .agy-tel-meta {
                 display: flex;
                 align-items: center;
@@ -1769,19 +1800,6 @@
                 flex-wrap: nowrap;
                 min-width: 0;
                 flex-shrink: 0;
-            }
-            .agy-tel-chip {
-                font-size: 11px;
-                line-height: 16px;
-                padding: 2px 8px;
-                border-radius: 100px;
-                background: var(--primary-new-detail-print-speed-bg-color, #373739);
-                color: var(--primary-card-device-name-text-color, #AEAEB2);
-                max-width: 115px;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-                font-variant-numeric: tabular-nums;
             }
             .agy-tel-srv-btn {
                 display: none;
@@ -1850,10 +1868,12 @@
                 justify-content: space-between;
                 gap: 12px;
                 min-width: 0;
+                flex: 1;
             }
             .agy-tel-activity {
                 display: flex;
                 flex-direction: column;
+                justify-content: center;
                 gap: 3px;
                 min-width: 0;
                 flex: 1;
@@ -1861,12 +1881,12 @@
             .agy-tel-badge {
                 display: inline-flex;
                 align-items: center;
-                gap: 7px;
-                padding: 4px 11px;
+                gap: 8px;
+                padding: 5px 12px;
                 border-radius: 999px;
                 width: fit-content;
                 max-width: 100%;
-                font-size: 13.5px;
+                font-size: 14px;
                 font-weight: 600;
                 letter-spacing: 0.1px;
                 border: 1px solid rgba(255, 255, 255, 0.10);
@@ -1885,23 +1905,16 @@
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
-            .agy-tel-raw {
-                font-size: 11px;
-                color: var(--primary-card-device-name-text-color, #AEAEB2);
-                padding-left: 2px;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-            }
             .agy-tel-speed-box {
                 display: flex;
                 flex-direction: column;
                 align-items: flex-end;
+                justify-content: center;
                 flex: none;
                 text-align: right;
             }
             .agy-tel-speed-val {
-                font-size: 22px;
+                font-size: 24px;
                 font-weight: 700;
                 line-height: 1.05;
                 font-variant-numeric: tabular-nums;
@@ -1912,7 +1925,7 @@
                 color: var(--primary-card-device-name-text-color, #AEAEB2);
             }
             .agy-tel-speed-val .agy-unit {
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 600;
                 margin-left: 3px;
                 opacity: 0.85;
@@ -1922,37 +1935,105 @@
                 color: var(--primary-card-device-name-text-color, #AEAEB2);
                 margin-top: 2px;
             }
-            .agy-tel-sub {
+
+            /* Dedicated 100% full-width secondary status container (sits above Velocità di stampa) */
+            .agy-telemetry-strip {
+                width: calc(100% - 20px);
+                margin: 0 10px 10px 10px;
+                padding: 9px 14px;
+                background-color: var(--primary-new-detail-card-bg-color, #2B2B2B);
+                border-radius: 6px;
+                box-sizing: border-box;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                color: var(--primary-card-right-value-text-color, #FFFFFF);
+            }
+            .agy-strip-top {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                gap: 10px;
+                gap: 12px;
+                min-width: 0;
+            }
+            .agy-strip-obj-wrap {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                min-width: 0;
+                flex: 1;
+            }
+            .agy-strip-icon {
+                font-size: 13.5px;
+                flex: none;
+                line-height: 1;
+                opacity: 0.9;
+            }
+            .agy-strip-obj-name {
+                font-size: 13px;
+                font-weight: 600;
+                color: var(--primary-card-right-value-text-color, #FFFFFF);
+                letter-spacing: 0.1px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .agy-strip-meta {
+                display: flex;
+                align-items: center;
+                gap: 6px;
                 flex-wrap: nowrap;
-                padding-top: 6px;
-                border-top: 1px solid rgba(128, 128, 128, 0.16);
-                font-size: 11.5px;
+                flex: none;
+            }
+            .agy-strip-chip {
+                font-size: 11px;
+                line-height: 16px;
+                padding: 2px 8px;
+                border-radius: 100px;
+                background: var(--primary-new-detail-print-speed-bg-color, #373739);
                 color: var(--primary-card-device-name-text-color, #AEAEB2);
+                white-space: nowrap;
                 font-variant-numeric: tabular-nums;
             }
-            .agy-tel-sub-left {
+            .agy-strip-chip.highlight {
+                color: var(--primary-button-hover-color, #17CC5F);
+                background: rgba(23, 204, 95, 0.12);
+                font-weight: 600;
+            }
+            .agy-strip-bot {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: nowrap;
+                font-size: 11.5px;
+                color: var(--primary-card-device-name-text-color, #AEAEB2);
+                min-width: 0;
+                border-top: 1px solid rgba(128, 128, 128, 0.14);
+                padding-top: 5px;
+            }
+            .agy-strip-gcode {
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                flex: 1;
+                min-width: 0;
+            }
+            .agy-strip-metrics {
                 display: flex;
                 align-items: center;
                 gap: 11px;
-                flex-wrap: nowrap;
                 flex: none;
                 white-space: nowrap;
+                font-variant-numeric: tabular-nums;
             }
-            .agy-tel-sub-right {
-                flex: 1;
-                min-width: 60px;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-                text-align: right;
+            .agy-strip-metrics span {
+                color: var(--primary-card-device-name-text-color, #AEAEB2);
             }
-            .agy-tel-sub b {
+            .agy-strip-metrics b {
                 color: var(--primary-card-right-value-text-color, #FFFFFF);
                 font-weight: 600;
+                margin-left: 2px;
             }
         `;
         document.head.appendChild(st);
@@ -2139,25 +2220,52 @@
         };
     }
 
+    function bindTelemetryCardEvents(card) {
+        if (!card) return;
+        const srvBtn = card.querySelector(".agy-tel-srv-btn");
+        if (srvBtn && !srvBtn.__agyBound) {
+            srvBtn.__agyBound = true;
+            srvBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const isUp = Boolean((serverControlStatus && (serverControlStatus.ai_running || serverControlStatus.port_8088_listening)) || serviceTelemetryOk);
+                controlServerAction(isUp ? "stop" : "start");
+            });
+        }
+        const srcPill = card.querySelector(".agy-tel-src");
+        if (srcPill && !srcPill.__agyBound) {
+            srcPill.__agyBound = true;
+            srcPill.style.cursor = "pointer";
+            srcPill.title = "Clicca per aprire il pannello Server AI";
+            srcPill.addEventListener("click", (e) => {
+                e.stopPropagation();
+                openAIPanel(false);
+            });
+        }
+    }
+
     function renderTelemetryCard() {
         if (!telemetryCardEl || !document.body.contains(telemetryCardEl)) return;
 
         const now = performance.now();
-        const q = (sel) => telemetryCardEl.querySelector(sel);
+        const qCard = (sel) => telemetryCardEl.querySelector(sel);
+        const qStrip = (sel) => (telemetryStripEl && document.body.contains(telemetryStripEl)) ? telemetryStripEl.querySelector(sel) : null;
 
-        const elObj = q(".agy-tel-obj");
-        const elLayer = q(".agy-tel-layer");
-        const elSrc = q(".agy-tel-src");
-        const elSrcText = q(".agy-tel-src-txt");
-        const elBadge = q(".agy-tel-badge");
-        const elDot = q(".agy-tel-badge-dot");
-        const elAct = q(".agy-tel-badge-txt");
-        const elRaw = q(".agy-tel-raw");
-        const elSpeedVal = q(".agy-tel-speed-num");
-        const elSpeedWrap = q(".agy-tel-speed-val");
-        const elSpeedLbl = q(".agy-tel-speed-lbl");
-        const elSubLeft = q(".agy-tel-sub-left");
-        const elSubRight = q(".agy-tel-sub-right");
+        const elSrc = qCard(".agy-tel-src");
+        const elSrcText = qCard(".agy-tel-src-txt");
+        const elSrvBtn = qCard(".agy-tel-srv-btn");
+        const elBadge = qCard(".agy-tel-badge");
+        const elDot = qCard(".agy-tel-badge-dot");
+        const elAct = qCard(".agy-tel-badge-txt");
+        const elSpeedVal = qCard(".agy-tel-speed-num");
+        const elSpeedWrap = qCard(".agy-tel-speed-val");
+        const elSpeedLbl = qCard(".agy-tel-speed-lbl");
+
+        const elObjName = qStrip(".agy-strip-obj-name");
+        const elLayer = qStrip(".agy-strip-layer");
+        const elProg = qStrip(".agy-strip-progress");
+        const elTime = qStrip(".agy-strip-time");
+        const elGcode = qStrip(".agy-strip-gcode");
+        const elMetrics = qStrip(".agy-strip-metrics");
 
         let view = null;
         let mode = "offline"; // "live" | "fallback" | "offline"
@@ -2218,7 +2326,6 @@
         }
 
         // Source indicator pill & inline Server AI Start/Stop quick button
-        const elSrvBtn = q(".agy-tel-srv-btn");
         const srvRunning = Boolean((serverControlStatus && (serverControlStatus.ai_running || serverControlStatus.port_8088_listening)) || mode === "live");
         if (elSrcText) {
             if (mode === "live") {
@@ -2255,34 +2362,69 @@
             }
         }
 
-        // Object chip
-        if (view.current_object) {
-            elObj.style.display = "";
-            elObj.textContent = view.current_object;
-            elObj.title = view.current_object;
-        } else {
-            elObj.style.display = "none";
-        }
-
-        // Layer chip
-        if (view.layer !== null && view.layer !== undefined) {
-            elLayer.style.display = "";
-            elLayer.textContent = view.total_layers
-                ? `Layer ${view.layer}/${view.total_layers}`
-                : `Layer ${view.layer}`;
-        } else {
-            elLayer.style.display = "none";
-        }
-
         // Badge styling & activity text
         const color = resolveBadgeColor(view);
         const tint = applyHexTint(color);
-        elBadge.style.backgroundColor = tint.bg;
-        elBadge.style.borderColor = tint.border;
-        elDot.style.backgroundColor = color;
-        elAct.textContent = view.activity_label || "In attesa";
+        if (elBadge) {
+            elBadge.style.backgroundColor = tint.bg;
+            elBadge.style.borderColor = tint.border;
+        }
+        if (elDot) elDot.style.backgroundColor = color;
+        if (elAct) elAct.textContent = view.activity_label || "In attesa";
 
-        // Secondary slicer line under badge
+        // Extrusion / nozzle speed in mm/s
+        const spd = Number(view.nozzle_speed_mm_s || 0);
+        if (elSpeedVal) elSpeedVal.textContent = spd.toFixed(1);
+        const activelyMoving = spd > 0.1;
+        if (elSpeedWrap) elSpeedWrap.className = activelyMoving ? "agy-tel-speed-val" : "agy-tel-speed-val muted";
+
+        if (elSpeedLbl) {
+            if (mode === "fallback") {
+                elSpeedLbl.textContent = "Velocità stimata";
+            } else if (view.activity_code === "travel" || view.activity_code === "wipe") {
+                elSpeedLbl.textContent = "Velocità spostamento";
+            } else {
+                elSpeedLbl.textContent = "Velocità estrusione";
+            }
+        }
+
+        // Dedicated full-width strip updates (Project Name, Layer, G-code, Metrics)
+        const showJobProgress = view.state === "printing" || view.state === "paused";
+        if (elObjName) {
+            const displayName = view.current_object || view.filename || (view.state === "printing" ? "Stampa in corso" : "Nessun progetto in stampa");
+            elObjName.textContent = displayName;
+            elObjName.title = displayName;
+        }
+
+        if (elLayer) {
+            if (view.layer !== null && view.layer !== undefined) {
+                elLayer.style.display = "";
+                elLayer.textContent = view.total_layers
+                    ? `Layer ${view.layer}/${view.total_layers}`
+                    : `Layer ${view.layer}`;
+            } else {
+                elLayer.style.display = "none";
+            }
+        }
+
+        if (elProg) {
+            if (view.progress_pct !== null && view.progress_pct !== undefined && showJobProgress) {
+                elProg.style.display = "";
+                elProg.textContent = `${Number(view.progress_pct).toFixed(1)}%`;
+            } else {
+                elProg.style.display = "none";
+            }
+        }
+
+        if (elTime) {
+            if (view.elapsed_label && showJobProgress) {
+                elTime.style.display = "";
+                elTime.textContent = view.elapsed_label;
+            } else {
+                elTime.style.display = "none";
+            }
+        }
+
         const details = [];
         if (mode === "live") {
             if (view.feature_raw && view.activity_code === "feature") {
@@ -2291,70 +2433,45 @@
                 details.push(view.activity_detail);
             }
             if (view.line_width_mm && view.activity_code === "feature") {
-                details.push(`Larghezza ${Number(view.line_width_mm).toFixed(2)} mm`);
+                details.push(`Larghezza: ${Number(view.line_width_mm).toFixed(2)} mm`);
             }
             if (view.activity_code === "travel") {
-                details.push("Nessuna estrusione");
+                details.push("Spostamento rapido (nessuna estrusione)");
             }
             if (view.activity_code === "idle" && !details.length) {
-                details.push("Stampante ferma");
+                details.push("Stampante pronta");
             }
         } else if (mode === "fallback") {
-            details.push("Avvia Servizio AI (:8088) per tipo stampa e flusso reale");
+            details.push("Avvia Servizio AI (:8088) per rilevamento tipo estrusione e flusso reale");
         } else {
-            details.push("Servizio AI (:8088) e socket stampante non attivi");
+            details.push("Servizio AI (:8088) offline · Avvia il server per abilitare la telemetria completa");
         }
-        elRaw.textContent = details.join(" · ");
-
-        // Extrusion / nozzle speed in mm/s
-        const spd = Number(view.nozzle_speed_mm_s || 0);
-        elSpeedVal.textContent = spd.toFixed(1);
-        const activelyMoving = spd > 0.1;
-        elSpeedWrap.className = activelyMoving ? "agy-tel-speed-val" : "agy-tel-speed-val muted";
-
-        if (mode === "fallback") {
-            elSpeedLbl.textContent = "Velocità stimata";
-        } else if (view.activity_code === "travel" || view.activity_code === "wipe") {
-            elSpeedLbl.textContent = "Velocità spostamento";
-        } else {
-            elSpeedLbl.textContent = "Velocità estrusione";
+        if (elGcode) {
+            elGcode.textContent = details.join(" · ");
+            elGcode.title = details.join(" · ");
         }
 
-        // Bottom metrics bar (safe DOM construction)
-        elSubLeft.replaceChildren();
-        const addMetric = (prefix, strongText) => {
-            const span = document.createElement("span");
-            span.appendChild(document.createTextNode(`${prefix}: `));
-            const b = document.createElement("b");
-            b.textContent = strongText;
-            span.appendChild(b);
-            elSubLeft.appendChild(span);
-        };
-
-        if (mode === "live") {
-            addMetric("Filamento", `${Number(view.filament_speed_mm_s || 0).toFixed(2)} mm/s`);
-            addMetric("Flusso", `${Number(view.flow_mm3_s || 0).toFixed(2)} mm³/s`);
-            addMetric("Fatt. vel", `${view.speed_factor_pct || 100}%`);
-        } else {
-            addMetric("Fatt. vel", `${view.speed_factor_pct || currentPrintSpeed || 100}%`);
-            if (ws9999State.curFlowratePct !== null) {
-                addMetric("Flusso imp.", `${ws9999State.curFlowratePct}%`);
+        if (elMetrics) {
+            elMetrics.replaceChildren();
+            const addMetric = (lbl, val) => {
+                const span = document.createElement("span");
+                span.appendChild(document.createTextNode(`${lbl}: `));
+                const b = document.createElement("b");
+                b.textContent = val;
+                span.appendChild(b);
+                elMetrics.appendChild(span);
+            };
+            if (mode === "live") {
+                addMetric("Filamento", `${Number(view.filament_speed_mm_s || 0).toFixed(2)} mm/s`);
+                addMetric("Flusso", `${Number(view.flow_mm3_s || 0).toFixed(2)} mm³/s`);
+                addMetric("Fattore", `${view.speed_factor_pct || 100}%`);
+            } else {
+                addMetric("Fattore", `${view.speed_factor_pct || currentPrintSpeed || 100}%`);
+                if (ws9999State.curFlowratePct !== null) {
+                    addMetric("Flusso", `${ws9999State.curFlowratePct}%`);
+                }
             }
         }
-
-        const rightParts = [];
-        const showJobProgress = view.state === "printing" || view.state === "paused";
-        if (view.progress_pct !== null && view.progress_pct !== undefined && showJobProgress) {
-            rightParts.push(`${Number(view.progress_pct).toFixed(1)}%`);
-        }
-        if (view.elapsed_label && showJobProgress) {
-            rightParts.push(view.elapsed_label);
-        }
-        if (view.filename) {
-            rightParts.push(view.filename);
-        }
-        elSubRight.textContent = rightParts.join(" · ");
-        elSubRight.title = view.filename || "";
     }
 
     function findFanControlRow(panelContainer, speedCtrlRow) {
@@ -2375,6 +2492,7 @@
         const speedWrapper = document.querySelector(".print-speed-wrapper");
         if (!speedWrapper) {
             telemetryCardEl = null;
+            telemetryStripEl = null;
             return;
         }
         const speedCtrlRow = speedWrapper.closest(".print-control-wrapper") || speedWrapper.parentElement;
@@ -2383,80 +2501,77 @@
 
         ensureSharedStyles();
         const fanCtrlRow = findFanControlRow(panelContainer, speedCtrlRow);
-        const existingCard = panelContainer.querySelector(".agy-telemetry-card");
-        if (existingCard) {
+
+        // 1. Side card (next to Modello di ventilatore)
+        let card = panelContainer.querySelector(".agy-telemetry-card");
+        if (!card) {
+            card = document.createElement("div");
+            card.className = "agy-telemetry-card";
+            card.innerHTML = `
+                <div class="agy-tel-head">
+                    <span class="agy-tel-src offline"><i></i><span class="agy-tel-src-txt">Offline</span></span>
+                    <div class="agy-tel-meta">
+                        <button type="button" class="agy-tel-srv-btn"></button>
+                    </div>
+                </div>
+                <div class="agy-tel-main">
+                    <div class="agy-tel-activity">
+                        <div class="agy-tel-badge">
+                            <span class="agy-tel-badge-dot"></span>
+                            <span class="agy-tel-badge-txt">In attesa di dati...</span>
+                        </div>
+                    </div>
+                    <div class="agy-tel-speed-box">
+                        <div class="agy-tel-speed-val muted"><span class="agy-tel-speed-num">0.0</span><span class="agy-unit">mm/s</span></div>
+                        <div class="agy-tel-speed-lbl">Velocità estrusione</div>
+                    </div>
+                </div>
+            `;
             if (fanCtrlRow) {
                 fanCtrlRow.classList.add("agy-fan-host-row");
-                if (existingCard.parentElement !== fanCtrlRow) {
-                    const oldWrapperRow = existingCard.closest(".agy-telemetry-row");
-                    fanCtrlRow.appendChild(existingCard);
-                    if (oldWrapperRow && oldWrapperRow !== fanCtrlRow) oldWrapperRow.remove();
-                }
+                fanCtrlRow.appendChild(card);
+            } else {
+                panelContainer.insertBefore(card, speedCtrlRow);
             }
-            telemetryCardEl = existingCard;
-            return;
-        }
-
-        const card = document.createElement("div");
-        card.className = "agy-telemetry-card";
-        card.innerHTML = `
-            <div class="agy-tel-head">
-                <span class="agy-tel-title">Attività ugello</span>
-                <div class="agy-tel-meta">
-                    <span class="agy-tel-chip agy-tel-obj" style="display:none"></span>
-                    <span class="agy-tel-chip agy-tel-layer" style="display:none"></span>
-                    <span class="agy-tel-src offline"><i></i><span class="agy-tel-src-txt">Offline</span></span>
-                    <button type="button" class="agy-tel-srv-btn"></button>
-                </div>
-            </div>
-            <div class="agy-tel-main">
-                <div class="agy-tel-activity">
-                    <div class="agy-tel-badge">
-                        <span class="agy-tel-badge-dot"></span>
-                        <span class="agy-tel-badge-txt">In attesa di dati...</span>
-                    </div>
-                    <div class="agy-tel-raw">Connessione telemetria in corso</div>
-                </div>
-                <div class="agy-tel-speed-box">
-                    <div class="agy-tel-speed-val muted"><span class="agy-tel-speed-num">0.0</span><span class="agy-unit">mm/s</span></div>
-                    <div class="agy-tel-speed-lbl">Velocità estrusione</div>
-                </div>
-            </div>
-            <div class="agy-tel-sub">
-                <div class="agy-tel-sub-left"></div>
-                <div class="agy-tel-sub-right"></div>
-            </div>
-        `;
-
-        if (fanCtrlRow) {
+        } else if (fanCtrlRow) {
             fanCtrlRow.classList.add("agy-fan-host-row");
-            fanCtrlRow.appendChild(card);
-        } else {
-            const row = document.createElement("div");
-            row.className = "agy-telemetry-row";
-            row.appendChild(card);
-            panelContainer.appendChild(row);
+            if (card.parentElement !== fanCtrlRow) {
+                const oldWrapperRow = card.closest(".agy-telemetry-row");
+                fanCtrlRow.appendChild(card);
+                if (oldWrapperRow && oldWrapperRow !== fanCtrlRow) oldWrapperRow.remove();
+            }
         }
-
-        const srvBtn = card.querySelector(".agy-tel-srv-btn");
-        if (srvBtn) {
-            srvBtn.addEventListener("click", (e) => {
-                e.stopPropagation();
-                const isUp = Boolean((serverControlStatus && (serverControlStatus.ai_running || serverControlStatus.port_8088_listening)) || serviceTelemetryOk);
-                controlServerAction(isUp ? "stop" : "start");
-            });
-        }
-        const srcPill = card.querySelector(".agy-tel-src");
-        if (srcPill) {
-            srcPill.style.cursor = "pointer";
-            srcPill.title = "Clicca per aprire il pannello Server AI";
-            srcPill.addEventListener("click", (e) => {
-                e.stopPropagation();
-                openAIPanel(false);
-            });
-        }
-
+        bindTelemetryCardEvents(card);
         telemetryCardEl = card;
+
+        // 2. Full-width thin horizontal container (inserted right before "Velocità di stampa")
+        let strip = panelContainer.querySelector(".agy-telemetry-strip");
+        if (!strip) {
+            strip = document.createElement("div");
+            strip.className = "agy-telemetry-strip";
+            strip.innerHTML = `
+                <div class="agy-strip-top">
+                    <div class="agy-strip-obj-wrap">
+                        <span class="agy-strip-icon">📦</span>
+                        <span class="agy-strip-obj-name" title="">In attesa di dati...</span>
+                    </div>
+                    <div class="agy-strip-meta">
+                        <span class="agy-strip-chip agy-strip-layer" style="display:none"></span>
+                        <span class="agy-strip-chip agy-strip-progress" style="display:none"></span>
+                        <span class="agy-strip-chip agy-strip-time" style="display:none"></span>
+                    </div>
+                </div>
+                <div class="agy-strip-bot">
+                    <span class="agy-strip-gcode">Connessione telemetria in corso...</span>
+                    <div class="agy-strip-metrics"></div>
+                </div>
+            `;
+        }
+        if (strip.parentElement !== panelContainer || strip.nextElementSibling !== speedCtrlRow) {
+            panelContainer.insertBefore(strip, speedCtrlRow);
+        }
+        telemetryStripEl = strip;
+
         renderTelemetryCard();
         pollServiceTelemetry(true);
         pollServerControlStatus(true);

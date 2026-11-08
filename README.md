@@ -421,9 +421,24 @@ The v1.1.0 update reorganizes the in-app control panel (`#aiPanel` in [`upscale.
 
 * **Grid Geometry:** Powered by CSS Grid (`grid-template-columns: 1.02fr 0.98fr; gap: 16px;`) with a maximum width of $650\,\text{px}$ and viewport-bounded scrollable height (`max-height: calc(100vh - top - 16px)`).
 * **Responsive Breakpoint:** Under window widths $\le 680\,\text{px}$, a CSS media query seamlessly collapses the grid into a single column to prevent horizontal overflow.
+* **Dynamic Conditional Control Visibility:**
+  * When the **Video Upscaler** is toggled off (`settings.enabled = false`), the adjustable parameter sections (*Prestazioni Video & FPS*, *Parametri Immagine*, *Qualità & Fluidità*) automatically collapse and hide, leaving a clean, low-profile message and preventing UI clutter.
+  * When the **Stringing AI Watchdog** is toggled off (`settings.stringingEnabled = false`), its secondary controls (*Pausa automatica*, *Sensibilità rilevamento*, live metrics grid, and *Ricalibra scena*) automatically collapse and hide.
 * **Independent Telemetry Badges:**
   * Top-Right Badge (`#aiBadge`): Dedicated to Video Upscaler status (`AI · 30.0 fps`, `Upscaler disattivo`, or `Upscaler offline`).
   * Top-Left Badge (`#agyStringingHost`): Dedicated to Stringing Watchdog status (`Stringing AI · Attiva`, `Sospetto stringing 65%`, `Stampa in pausa · Stringing 91%`, or `Stringing AI · Off`).
+
+### 3. Redesigned Extrusion Activity & Full-Width Project Telemetry Strip
+
+To ensure perfect readability and prevent horizontal text truncation on narrow sidebars:
+* **Lean Side Card (`.agy-telemetry-card`):** Mounted in Row 2 directly alongside Creality's native *Modello di ventilatore* card. It focuses exclusively on:
+  * Connection & service state pill (`Live`, `Diretto :9999`, or `Offline`), with a one-click quick start/stop button (`▶ Avvia AI` / `■ Stop AI`).
+  * Prominent, color-tinted **Extrusion Activity Badge** (`Parete esterna`, `Riempimento`, `Stiratura`, `Supporto`, `Spostamento`, etc.) with pulsing indicator dot.
+  * High-contrast real-time **Nozzle Speed Display** (`mm/s`) with dynamic activity labeling (*Velocità estrusione* vs. *Velocità spostamento*).
+  * Redundant nozzle/bed temperatures and container titles have been removed, giving the card a clean, balanced 120 px profile matching the native fan widget.
+* **Full-Width Telemetry Strip (`.agy-telemetry-strip`):** Injected directly above the native *Velocità di stampa* card, spanning 100% of the available container width:
+  * **Top Row:** Displays the full, unclipped **Project / 3D Model Name** (`📦 Nome Oggetto`) with generous horizontal space, alongside `Layer X/Y`, job progress percentage, and elapsed / remaining time chips.
+  * **Bottom Row:** Displays the complete unclipped **G-code Feature & Extrusion Line** (`G-code: Outer wall · Larghezza: 0.45 mm`) paired with real-time physical extrusion telemetry (`Filamento: X mm/s`, `Flusso: Y mm³/s`, `Fattore: Z%`).
 
 ---
 
