@@ -59,6 +59,11 @@
     let stringingConfigSynced = false;
     let alertDismissedAt = 0;
     let lastUiPauseSentAt = -100000;
+    let isRoiSelecting = false;
+    let roiDragStart = null;
+    let roiDragCurrent = null;
+    let currentRenderedBoxes = [];
+    let roiBannerEl = null;
 
     // Server lifecycle supervisor state (:8089 / :8088)
     let serverControlStatus = null;
@@ -83,6 +88,7 @@
         stringingEnabled: true,
         stringingAutoPause: true,
         stringingSensitivity: "balanced", // low | balanced | high
+        stringingRoi: null, // null | { x, y, w, h } normalized 0..1
         serverMode: "auto" // auto | standalone_cpu | full_gpu
     };
     let settings = Object.assign({}, defaults);
@@ -112,7 +118,8 @@
         const cfg = {
             enabled: Boolean(settings.stringingEnabled),
             auto_pause: Boolean(settings.stringingAutoPause),
-            sensitivity: settings.stringingSensitivity || "balanced"
+            sensitivity: settings.stringingSensitivity || "balanced",
+            roi: settings.stringingRoi || null
         };
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
@@ -130,6 +137,54 @@
         }).then((r) => {
             if (r.ok) stringingConfigSynced = true;
         }).catch(() => {});
+    }
+
+    function sendStringingAction(endpoint, wsAction) {
+        const addr = (typeof findPrinterAddress === "function" ? (findPrinterAddress(activeVideo) || findPrinterAddress(sliderEl)) : null) || activePrinterIp;
+        if (ws && ws.readyState === WebSocket.OPEN && wsAction) {
+            try { ws.send(JSON.stringify({ action: wsAction, ip: addr || undefined })); } catch (e) {}
+        }
+        const ipQ = addr ? `?ip=${encodeURIComponent(addr)}` : "";
+        fetch(`${API_URL}/ai/stringing/${endpoint}${ipQ}`, { method: "POST" })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((json) => { if (json && json.ok) handleStringingStatus(json); })
+            .catch(() => {});
+    }
+
+    function sendStringingPayload(endpoint, wsAction, payload) {
+        const addr = (typeof findPrinterAddress === "function" ? (findPrinterAddress(activeVideo) || findPrinterAddress(sliderEl)) : null) || activePrinterIp;
+        if (ws && ws.readyState === WebSocket.OPEN && wsAction) {
+            try { ws.send(JSON.stringify({ action: wsAction, ip: addr || undefined, data: payload })); } catch (e) {}
+        }
+        const ipQ = addr ? `?ip=${encodeURIComponent(addr)}` : "";
+        fetch(`${API_URL}/ai/stringing/${endpoint}${ipQ}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload || {})
+        })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((json) => { if (json && json.ok) handleStringingStatus(json); })
+            .catch(() => {});
+    }
+
+    function ignoreDefectRegion(target) {
+        if (!target) return;
+        const payload = {
+            id: target.id || target.defect_id,
+            x: target.x,
+            y: target.y,
+            w: target.w,
+            h: target.h
+        };
+        sendStringingPayload("ignore_region", "stringing_ignore_region", payload);
+    }
+
+    function unignoreDefectRegion(target) {
+        if (!target) return;
+        const payload = {
+            id: target.id || target.defect_id
+        };
+        sendStringingPayload("unignore_region", "stringing_unignore_region", payload);
     }
 
     // ---------------------------------------------------------------- WebSocket
@@ -371,16 +426,94 @@
         }
         stringingCtx.clearRect(0, 0, tw, th);
 
-        if (!settings.stringingEnabled || !stringingStatus || !stringingStatus.ok) return;
-        const regions = stringingStatus.regions;
-        const state = stringingStatus.ai_state;
-        if (!Array.isArray(regions) || !regions.length) return;
-        const hasIgnored = regions.some((r) => r && r.ignored);
-        if (!hasIgnored && state !== "warning" && state !== "paused_by_ai" && state !== "alert_only" && Number(stringingStatus.score || 0) < 0.45) {
+        const box = getRenderedVideoBox(activeVideo, rect);
+        currentRenderedBoxes = [];
+
+        // 1. Shroud excluded space if custom ROI is defined
+        if (settings.stringingEnabled && settings.stringingRoi && typeof settings.stringingRoi === "object") {
+            const rx = box.x + Number(settings.stringingRoi.x || 0) * box.w;
+            const ry = box.y + Number(settings.stringingRoi.y || 0) * box.h;
+            const rw = Math.max(10, Number(settings.stringingRoi.w || 1) * box.w);
+            const rh = Math.max(10, Number(settings.stringingRoi.h || 1) * box.h);
+
+            stringingCtx.save();
+            stringingCtx.scale(dpr, dpr);
+
+            // Shading outside ROI
+            stringingCtx.fillStyle = "rgba(0, 0, 0, 0.38)";
+            if (ry > box.y) stringingCtx.fillRect(box.x, box.y, box.w, ry - box.y);
+            if ((box.y + box.h) > (ry + rh)) stringingCtx.fillRect(box.x, ry + rh, box.w, (box.y + box.h) - (ry + rh));
+            if (rx > box.x) stringingCtx.fillRect(box.x, ry, rx - box.x, rh);
+            if ((box.x + box.w) > (rx + rw)) stringingCtx.fillRect(rx + rw, ry, (box.x + box.w) - (rx + rw), rh);
+
+            // Dashed emerald border around ROI
+            stringingCtx.setLineDash([6, 4]);
+            stringingCtx.strokeStyle = "#10B981";
+            stringingCtx.lineWidth = 1.8;
+            stringingCtx.strokeRect(rx, ry, rw, rh);
+
+            // Badge
+            stringingCtx.setLineDash([]);
+            stringingCtx.font = '600 10px "Segoe UI", sans-serif';
+            const roiTag = "📐 Zona Rilevamento AI";
+            const rtw = stringingCtx.measureText(roiTag).width + 12;
+            const rby = ry > 20 ? ry - 18 : ry + 2;
+            stringingCtx.fillStyle = "rgba(16, 185, 129, 0.92)";
+            stringingCtx.fillRect(rx, rby, rtw, 16);
+            stringingCtx.fillStyle = "#FFFFFF";
+            stringingCtx.fillText(roiTag, rx + 6, rby + 12);
+            stringingCtx.restore();
+        }
+
+        // 2. Draw live selection box while user is dragging
+        if (isRoiSelecting && roiDragStart && roiDragCurrent) {
+            const x1 = Math.min(roiDragStart.x, roiDragCurrent.x);
+            const y1 = Math.min(roiDragStart.y, roiDragCurrent.y);
+            const w1 = Math.max(4, Math.abs(roiDragCurrent.x - roiDragStart.x));
+            const h1 = Math.max(4, Math.abs(roiDragCurrent.y - roiDragStart.y));
+
+            stringingCtx.save();
+            stringingCtx.scale(dpr, dpr);
+            stringingCtx.setLineDash([5, 3]);
+            stringingCtx.strokeStyle = "#34D399";
+            stringingCtx.lineWidth = 2.2;
+            stringingCtx.fillStyle = "rgba(16, 185, 129, 0.15)";
+            stringingCtx.fillRect(x1, y1, w1, h1);
+            stringingCtx.strokeRect(x1, y1, w1, h1);
+
+            stringingCtx.setLineDash([]);
+            stringingCtx.font = 'bold 11px "Segoe UI", sans-serif';
+            const dragTag = "📐 Trascina e rilascia per impostare";
+            const dtw = stringingCtx.measureText(dragTag).width + 12;
+            const dy = y1 > 22 ? y1 - 20 : y1 + 4;
+            stringingCtx.fillStyle = "rgba(5, 150, 105, 0.95)";
+            stringingCtx.fillRect(x1, dy, dtw, 18);
+            stringingCtx.fillStyle = "#FFFFFF";
+            stringingCtx.fillText(dragTag, x1 + 6, dy + 13);
+            stringingCtx.restore();
+
+            if (stringingCanvas) stringingCanvas.style.pointerEvents = "auto";
             return;
         }
 
-        const box = getRenderedVideoBox(activeVideo, rect);
+        if (!settings.stringingEnabled || !stringingStatus || !stringingStatus.ok) {
+            if (stringingCanvas) stringingCanvas.style.pointerEvents = isRoiSelecting ? "auto" : "none";
+            return;
+        }
+
+        const regions = stringingStatus.regions;
+        const state = stringingStatus.ai_state;
+        if (!Array.isArray(regions) || !regions.length) {
+            if (stringingCanvas) stringingCanvas.style.pointerEvents = isRoiSelecting ? "auto" : "none";
+            return;
+        }
+
+        const hasIgnored = regions.some((r) => r && r.ignored);
+        if (!hasIgnored && state !== "warning" && state !== "paused_by_ai" && state !== "alert_only" && Number(stringingStatus.score || 0) < 0.45) {
+            if (stringingCanvas) stringingCanvas.style.pointerEvents = isRoiSelecting ? "auto" : "none";
+            return;
+        }
+
         const isDanger = state === "paused_by_ai" || state === "alert_only" || Number(stringingStatus.ema_score || 0) >= Number(stringingStatus.threshold || 0.55);
         const stroke = isDanger ? "#EF4444" : "#F59E0B";
         const fill = isDanger ? "rgba(239, 68, 68, 0.12)" : "rgba(245, 158, 11, 0.10)";
@@ -436,13 +569,133 @@
             const tag = `Stringing ${Math.round(Number(r.score || 0) * 100)}%`;
             stringingCtx.font = '600 11px "Segoe UI", sans-serif';
             const twLbl = stringingCtx.measureText(tag).width + 10;
-            const ly = y > 20 ? y - 18 : y + 4;
-            stringingCtx.fillStyle = isDanger ? "rgba(185, 28, 28, 0.90)" : "rgba(180, 83, 9, 0.88)";
-            stringingCtx.fillRect(x, ly, twLbl, 16);
+            const ly = y > 22 ? y - 20 : y + 4;
+            stringingCtx.fillStyle = isDanger ? "rgba(185, 28, 28, 0.92)" : "rgba(180, 83, 9, 0.90)";
+            stringingCtx.fillRect(x, ly, twLbl, 18);
             stringingCtx.fillStyle = "#FFFFFF";
-            stringingCtx.fillText(tag, x + 5, ly + 12);
+            stringingCtx.fillText(tag, x + 5, ly + 13);
+
+            // Distinct clickable [ ✕ Ignora ] badge
+            const ignTag = "✕ Ignora";
+            stringingCtx.font = 'bold 10px "Segoe UI", sans-serif';
+            const twIgn = stringingCtx.measureText(ignTag).width + 12;
+            const ignX = x + twLbl + 4;
+            stringingCtx.fillStyle = "rgba(15, 23, 42, 0.92)";
+            stringingCtx.fillRect(ignX, ly, twIgn, 18);
+            stringingCtx.strokeStyle = "rgba(239, 68, 68, 0.85)";
+            stringingCtx.lineWidth = 1;
+            stringingCtx.strokeRect(ignX, ly, twIgn, 18);
+            stringingCtx.fillStyle = "#FCA5A5";
+            stringingCtx.fillText(ignTag, ignX + 6, ly + 13);
+
+            currentRenderedBoxes.push({
+                region: r,
+                boxRect: { x, y, w, h },
+                btnRect: { x: ignX, y: ly, w: twIgn, h: 18 }
+            });
         });
         stringingCtx.restore();
+
+        if (stringingCanvas) {
+            stringingCanvas.style.pointerEvents = (isRoiSelecting || currentRenderedBoxes.length > 0) ? "auto" : "none";
+        }
+    }
+
+    function attachStringingCanvasEvents() {
+        if (!stringingCanvas || stringingCanvas.__agyEventsAttached) return;
+        stringingCanvas.__agyEventsAttached = true;
+
+        stringingCanvas.addEventListener("mousemove", (e) => {
+            if (isRoiSelecting) {
+                stringingCanvas.style.cursor = "crosshair";
+                if (roiDragStart) {
+                    roiDragCurrent = { x: e.offsetX, y: e.offsetY };
+                    drawStringingOverlay();
+                }
+                return;
+            }
+            const mx = e.offsetX;
+            const my = e.offsetY;
+            const hit = currentRenderedBoxes.find((b) => {
+                const inBtn = mx >= b.btnRect.x && mx <= b.btnRect.x + b.btnRect.w && my >= b.btnRect.y && my <= b.btnRect.y + b.btnRect.h;
+                const inBox = mx >= b.boxRect.x && mx <= b.boxRect.x + b.boxRect.w && my >= b.boxRect.y && my <= b.boxRect.y + b.boxRect.h;
+                return inBtn || inBox;
+            });
+            if (hit) {
+                stringingCanvas.style.cursor = "pointer";
+                stringingCanvas.title = "Clicca per ignorare solo questo riquadro (" + (hit.region.id || "Stringing") + ")";
+            } else {
+                stringingCanvas.style.cursor = "default";
+                stringingCanvas.title = "";
+            }
+        });
+
+        stringingCanvas.addEventListener("mousedown", (e) => {
+            if (e.button !== 0) return;
+            if (isRoiSelecting) {
+                roiDragStart = { x: e.offsetX, y: e.offsetY };
+                roiDragCurrent = { x: e.offsetX, y: e.offsetY };
+                drawStringingOverlay();
+                return;
+            }
+            const mx = e.offsetX;
+            const my = e.offsetY;
+            const hit = currentRenderedBoxes.find((b) => {
+                const inBtn = mx >= b.btnRect.x && mx <= b.btnRect.x + b.btnRect.w && my >= b.btnRect.y && my <= b.btnRect.y + b.btnRect.h;
+                const inBox = mx >= b.boxRect.x && mx <= b.boxRect.x + b.boxRect.w && my >= b.boxRect.y && my <= b.boxRect.y + b.boxRect.h;
+                return inBtn || inBox;
+            });
+            if (hit) {
+                e.stopPropagation();
+                e.preventDefault();
+                ignoreDefectRegion(hit.region);
+            }
+        });
+
+        stringingCanvas.addEventListener("mouseup", (e) => {
+            if (isRoiSelecting && roiDragStart && roiDragCurrent && activeVideo) {
+                const rect = activeVideo.getBoundingClientRect();
+                const box = getRenderedVideoBox(activeVideo, rect);
+                const x1 = Math.min(roiDragStart.x, roiDragCurrent.x);
+                const x2 = Math.max(roiDragStart.x, roiDragCurrent.x);
+                const y1 = Math.min(roiDragStart.y, roiDragCurrent.y);
+                const y2 = Math.max(roiDragStart.y, roiDragCurrent.y);
+
+                const dragW = x2 - x1;
+                const dragH = y2 - y1;
+                if (dragW >= 20 && dragH >= 20 && box.w > 0 && box.h > 0) {
+                    const normX = Math.max(0.0, Math.min(0.95, (x1 - box.x) / box.w));
+                    const normY = Math.max(0.0, Math.min(0.95, (y1 - box.y) / box.h));
+                    const normW = Math.max(0.04, Math.min(1.0 - normX, dragW / box.w));
+                    const normH = Math.max(0.04, Math.min(1.0 - normY, dragH / box.h));
+                    settings.stringingRoi = {
+                        x: Math.round(normX * 10000) / 10000,
+                        y: Math.round(normY * 10000) / 10000,
+                        w: Math.round(normW * 10000) / 10000,
+                        h: Math.round(normH * 10000) / 10000,
+                    };
+                    saveSettings();
+                    pushStringingConfigToService();
+                }
+                isRoiSelecting = false;
+                roiDragStart = null;
+                roiDragCurrent = null;
+                if (roiBannerEl) roiBannerEl.style.display = "none";
+                drawStringingOverlay();
+                updateStringingUI();
+            }
+        });
+
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && isRoiSelecting) {
+                isRoiSelecting = false;
+                roiDragStart = null;
+                roiDragCurrent = null;
+                if (roiBannerEl) roiBannerEl.style.display = "none";
+                drawStringingOverlay();
+                updateStringingUI();
+            }
+        });
     }
 
     function sendUiFallbackPause(addr) {
@@ -822,6 +1075,67 @@
                 }
                 if (elLat) elLat.textContent = `${Number(st.avg_infer_ms || 0).toFixed(1)} ms`;
                 if (elStreak) elStreak.textContent = `${Number(st.streak_sec || 0).toFixed(1)} / ${Number(st.confirm_seconds || 4.5).toFixed(1)}s`;
+
+                const elRoiLbl = uiContainer.querySelector("#hudStrRoiLbl");
+                if (elRoiLbl) {
+                    if (settings.stringingRoi) {
+                        const r = settings.stringingRoi;
+                        elRoiLbl.textContent = `Personalizzata (${Math.round(r.w * 100)}% x ${Math.round(r.h * 100)}%)`;
+                        elRoiLbl.style.color = "#10B981";
+                    } else {
+                        elRoiLbl.textContent = "Intero piatto";
+                        elRoiLbl.style.color = "#94A3B8";
+                    }
+                }
+
+                const activeWrap = uiContainer.querySelector("#strActiveBoxesWrap");
+                const activeList = uiContainer.querySelector("#strActiveBoxesList");
+                if (activeWrap && activeList) {
+                    const activeBoxes = (st && Array.isArray(st.regions)) ? st.regions.filter((r) => !r.ignored) : [];
+                    if (activeBoxes.length > 0) {
+                        activeWrap.style.display = "block";
+                        activeList.innerHTML = activeBoxes.map((r, idx) => `
+                            <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);padding:4px 8px;border-radius:4px;font-size:11px">
+                                <span style="color:#FCA5A5"><b>${r.id || `Box #${idx + 1}`}</b> &middot; Conf: ${Math.round(Number(r.score || 0) * 100)}%</span>
+                                <button type="button" class="ai-btn" data-box-id="${r.id}" style="padding:2px 8px;font-size:10px;background:#B91C1C;color:#fff;border:none;border-radius:3px;cursor:pointer">✕ Ignora solo questo</button>
+                            </div>
+                        `).join("");
+                        activeList.querySelectorAll("button[data-box-id]").forEach((btn) => {
+                            btn.addEventListener("click", () => {
+                                const bId = btn.getAttribute("data-box-id");
+                                const target = activeBoxes.find((b) => b.id === bId) || { id: bId };
+                                ignoreDefectRegion(target);
+                            });
+                        });
+                    } else {
+                        activeWrap.style.display = "none";
+                        activeList.innerHTML = "";
+                    }
+                }
+
+                const ignWrap = uiContainer.querySelector("#strIgnoredBoxesWrap");
+                const ignList = uiContainer.querySelector("#strIgnoredBoxesList");
+                if (ignWrap && ignList) {
+                    const ignoredList = (st && Array.isArray(st.ignored_defects)) ? st.ignored_defects : [];
+                    if (ignoredList.length > 0) {
+                        ignWrap.style.display = "block";
+                        ignList.innerHTML = ignoredList.map((d) => `
+                            <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(100,116,139,0.12);border:1px solid rgba(148,163,184,0.25);padding:4px 8px;border-radius:4px;font-size:11px">
+                                <span style="color:#CBD5E1"><b>${d.id}</b> &middot; Letto (${Math.round(Number(d.score || 0) * 100)}%)</span>
+                                <button type="button" class="ai-btn" data-ign-id="${d.id}" style="padding:2px 8px;font-size:10px;background:#334155;color:#E2E8F0;border:1px solid #64748B;border-radius:3px;cursor:pointer">↺ Ripristina</button>
+                            </div>
+                        `).join("");
+                        ignList.querySelectorAll("button[data-ign-id]").forEach((btn) => {
+                            btn.addEventListener("click", () => {
+                                const dId = btn.getAttribute("data-ign-id");
+                                unignoreDefectRegion({ id: dId });
+                            });
+                        });
+                    } else {
+                        ignWrap.style.display = "none";
+                        ignList.innerHTML = "";
+                    }
+                }
             } else {
                 if (elSens) { elSens.textContent = "-"; elSens.style.color = "#F2F2F4"; }
                 if (elIgnored) { elIgnored.textContent = "0"; elIgnored.style.color = "#8E8E93"; }
@@ -829,6 +1143,10 @@
                 if (elConf) elConf.textContent = "-";
                 if (elLat) elLat.textContent = "-";
                 if (elStreak) elStreak.textContent = "-";
+                const activeWrap = uiContainer.querySelector("#strActiveBoxesWrap");
+                if (activeWrap) activeWrap.style.display = "none";
+                const ignWrap = uiContainer.querySelector("#strIgnoredBoxesWrap");
+                if (ignWrap) ignWrap.style.display = "none";
             }
         }
 
@@ -855,6 +1173,31 @@
                 if (alert.feature_label) parts.push(alert.feature_label);
                 if (alert.time_str) parts.push(alert.time_str);
                 descEl.textContent = parts.join(" · ");
+
+                const alertBoxesWrap = stringingAlertEl.querySelector("#agyAlertRegionsWrap");
+                const alertBoxesList = stringingAlertEl.querySelector("#agyAlertRegionsList");
+                if (alertBoxesWrap && alertBoxesList) {
+                    const alertRegions = (alert.regions || []).filter((r) => !r.ignored);
+                    if (alertRegions.length > 0) {
+                        alertBoxesWrap.style.display = "block";
+                        alertBoxesList.innerHTML = alertRegions.map((r, idx) => `
+                            <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,0.35);padding:3px 6px;border-radius:3px;font-size:11px">
+                                <span style="color:#FCA5A5">${r.id || `Riquadro #${idx+1}`} &middot; ${Math.round(Number(r.score || 0)*100)}%</span>
+                                <button type="button" data-alert-box-id="${r.id}" style="padding:2px 6px;font-size:10px;background:#B91C1C;color:#fff;border:none;border-radius:3px;cursor:pointer">✕ Ignora solo questo</button>
+                            </div>
+                        `).join("");
+                        alertBoxesList.querySelectorAll("button[data-alert-box-id]").forEach((btn) => {
+                            btn.addEventListener("click", (e) => {
+                                e.stopPropagation();
+                                const bId = btn.getAttribute("data-alert-box-id");
+                                const target = alertRegions.find((b) => b.id === bId) || { id: bId };
+                                ignoreDefectRegion(target);
+                            });
+                        });
+                    } else {
+                        alertBoxesWrap.style.display = "none";
+                    }
+                }
 
                 const ipQ = st.ip ? `ip=${encodeURIComponent(st.ip)}&` : "";
                 const snapKey = `${alert.timestamp}`;
@@ -940,6 +1283,15 @@
             stringingCtx = stringingCanvas.getContext("2d");
         }
         if (stringingCanvas.parentElement !== parent) parent.appendChild(stringingCanvas);
+        attachStringingCanvasEvents();
+
+        if (!roiBannerEl) {
+            roiBannerEl = document.createElement("div");
+            roiBannerEl.id = "agyRoiBanner";
+            roiBannerEl.style.cssText = "display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(16,185,129,0.95);color:#fff;padding:8px 18px;border-radius:6px;font-size:12px;font-weight:600;z-index:25;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,0.4);text-align:center;";
+            roiBannerEl.innerHTML = "📐 Trascina con il mouse sul video per definire la zona di monitoraggio AI &middot; Premi ESC per annullare";
+        }
+        if (roiBannerEl.parentElement !== parent) parent.appendChild(roiBannerEl);
 
         createUI(parent);
         connectAIWebSocket();
@@ -1156,6 +1508,22 @@
                                     <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; ~59%)</option>
                                     <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; ~83%)</option>
                                 </select>
+                                <div class="ai-label" style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;margin-bottom:4px">
+                                    <span>📐 Zona di monitoraggio (ROI)</span>
+                                    <span id="hudStrRoiLbl" style="font-weight:normal;color:#10B981;font-size:11px">Intero piatto</span>
+                                </div>
+                                <div class="ai-btn-row" style="margin-bottom:8px">
+                                    <button type="button" class="ai-btn" id="btnStrSelectRoi" title="Trascina con il mouse sul video della camera per definire l'area di monitoraggio AI">📐 Seleziona Zona</button>
+                                    <button type="button" class="ai-btn" id="btnStrResetRoi" title="Ripristina il monitoraggio su tutto il piatto di stampa">🔄 Ripristina Intero Piatto</button>
+                                </div>
+                                <div id="strActiveBoxesWrap" style="margin-bottom:8px;display:none">
+                                    <div class="ai-label" style="color:#F59E0B;margin-bottom:4px">Riquadri Stringing Attivi:</div>
+                                    <div id="strActiveBoxesList" style="display:flex;flex-direction:column;gap:4px"></div>
+                                </div>
+                                <div id="strIgnoredBoxesWrap" style="margin-bottom:8px;display:none">
+                                    <div class="ai-label" style="color:#94A3B8;margin-bottom:4px">Zone Lette &amp; Ignorate:</div>
+                                    <div id="strIgnoredBoxesList" style="display:flex;flex-direction:column;gap:4px"></div>
+                                </div>
                                 <div class="ai-stats" style="margin-bottom:8px">
                                     <div class="ai-stat">Sensibilit&agrave; calib.<b id="hudStrSensPct">-</b></div>
                                     <div class="ai-stat">Difetti ignorati<b id="hudStrIgnored">0</b></div>
@@ -1265,9 +1633,13 @@
             <div id="agyStringingAlert">
                 <div class="agy-str-alert-title"></div>
                 <div class="agy-str-alert-desc"></div>
+                <div id="agyAlertRegionsWrap" style="margin:6px 0;max-height:100px;overflow-y:auto;display:none;">
+                    <div style="font-size:11px;color:#cbd5e1;margin-bottom:4px;font-weight:600">Zone segnalate (ignora falso allarme):</div>
+                    <div id="agyAlertRegionsList" style="display:flex;flex-direction:column;gap:4px"></div>
+                </div>
                 <img class="agy-str-alert-img" alt="Snapshot stringing AI" onerror="this.style.display='none'">
                 <div class="agy-str-alert-actions">
-                    <button type="button" class="primary" id="btnAlertAck">Segna letto &amp; Continua</button>
+                    <button type="button" class="primary" id="btnAlertAck">Segna tutti letti &amp; Continua</button>
                     <button type="button" id="btnAlertReset">Ricalibra scena</button>
                     <button type="button" id="btnAlertDismiss">Chiudi</button>
                 </div>
@@ -1279,18 +1651,6 @@
 
         const q = (id) => uiContainer.querySelector(id);
         const badge = q("#aiBadge"), panel = q("#aiPanel"), badgeText = q("#badgeText");
-
-        function sendStringingAction(endpoint, wsAction) {
-            const addr = findPrinterAddress(activeVideo) || findPrinterAddress(sliderEl) || activePrinterIp;
-            if (ws && ws.readyState === WebSocket.OPEN && wsAction) {
-                try { ws.send(JSON.stringify({ action: wsAction, ip: addr || undefined })); } catch (e) {}
-            }
-            const ipQ = addr ? `?ip=${encodeURIComponent(addr)}` : "";
-            fetch(`${API_URL}/ai/stringing/${endpoint}${ipQ}`, { method: "POST" })
-                .then((r) => (r.ok ? r.json() : null))
-                .then((json) => { if (json && json.ok) handleStringingStatus(json); })
-                .catch(() => {});
-        }
 
         stringingBadgeEl.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -1435,6 +1795,25 @@
         });
         q("#strAutoPauseToggle").addEventListener("change", (e) => { settings.stringingAutoPause = e.target.checked; saveSettings(); pushStringingConfigToService(); });
         q("#strSensSelect").addEventListener("change", (e) => { settings.stringingSensitivity = e.target.value; saveSettings(); pushStringingConfigToService(); });
+        q("#btnStrSelectRoi").addEventListener("click", () => {
+            isRoiSelecting = true;
+            roiDragStart = null;
+            roiDragCurrent = null;
+            if (roiBannerEl) roiBannerEl.style.display = "block";
+            if (stringingCanvas) {
+                stringingCanvas.style.pointerEvents = "auto";
+                stringingCanvas.style.cursor = "crosshair";
+            }
+            openAIPanel(false);
+            drawStringingOverlay();
+        });
+        q("#btnStrResetRoi").addEventListener("click", () => {
+            settings.stringingRoi = null;
+            saveSettings();
+            pushStringingConfigToService();
+            drawStringingOverlay();
+            updateStringingUI();
+        });
         q("#btnStrAck").addEventListener("click", () => sendStringingAction("ack", "stringing_ack"));
         q("#btnStrResetSens").addEventListener("click", () => sendStringingAction("reset_sensitivity", "stringing_reset_sens"));
         q("#btnStrReset").addEventListener("click", () => sendStringingAction("reset", "stringing_reset"));

@@ -1353,6 +1353,42 @@ def create_standalone_server(
                         return
                     ip = validate_printer_ip(ip_raw, default_ip)
                     self._send_json(watchdog.clear_ignored_defects(ip))
+                elif parsed.path == "/ai/stringing/ignore_region":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    data = {}
+                    if length > 0:
+                        try:
+                            data = json.loads(self.rfile.read(length).decode("utf-8"))
+                        except Exception:
+                            data = {}
+                    if not data and "id" in qs:
+                        data["id"] = qs["id"][0]
+                    if not data and "point_x" in qs:
+                        data["point_x"] = float(qs["point_x"][0])
+                        data["point_y"] = float(qs.get("point_y", ["0.0"])[0])
+                    if not data and "x" in qs:
+                        data["x"] = float(qs["x"][0])
+                        data["y"] = float(qs.get("y", ["0.0"])[0])
+                        data["w"] = float(qs.get("w", ["0.12"])[0])
+                        data["h"] = float(qs.get("h", ["0.12"])[0])
+                    self._send_json(watchdog.ignore_defect_region(data, ip))
+                elif parsed.path == "/ai/stringing/unignore_region":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    data = {}
+                    if length > 0:
+                        try:
+                            data = json.loads(self.rfile.read(length).decode("utf-8"))
+                        except Exception:
+                            data = {}
+                    if not data and "id" in qs:
+                        data["id"] = qs["id"][0]
+                    self._send_json(watchdog.unignore_defect_region(data, ip))
                 elif parsed.path == "/ai/stringing/snapshot":
                     if watchdog is None:
                         self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
@@ -1480,6 +1516,42 @@ def create_standalone_server(
                         return
                     ip = validate_printer_ip(ip_raw, default_ip)
                     self._send_json(watchdog.clear_ignored_defects(ip))
+                elif parsed.path == "/ai/stringing/ignore_region":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    data = {}
+                    if length > 0:
+                        try:
+                            data = json.loads(self.rfile.read(length).decode("utf-8"))
+                        except Exception:
+                            data = {}
+                    if not data and "id" in qs:
+                        data["id"] = qs["id"][0]
+                    if not data and "point_x" in qs:
+                        data["point_x"] = float(qs["point_x"][0])
+                        data["point_y"] = float(qs.get("point_y", ["0.0"])[0])
+                    if not data and "x" in qs:
+                        data["x"] = float(qs["x"][0])
+                        data["y"] = float(qs.get("y", ["0.0"])[0])
+                        data["w"] = float(qs.get("w", ["0.12"])[0])
+                        data["h"] = float(qs.get("h", ["0.12"])[0])
+                    self._send_json(watchdog.ignore_defect_region(data, ip))
+                elif parsed.path == "/ai/stringing/unignore_region":
+                    if watchdog is None:
+                        self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
+                        return
+                    ip = validate_printer_ip(ip_raw, default_ip)
+                    data = {}
+                    if length > 0:
+                        try:
+                            data = json.loads(self.rfile.read(length).decode("utf-8"))
+                        except Exception:
+                            data = {}
+                    if not data and "id" in qs:
+                        data["id"] = qs["id"][0]
+                    self._send_json(watchdog.unignore_defect_region(data, ip))
                 elif parsed.path == "/printer/pause":
                     if watchdog is None:
                         self._send_json({"ok": False, "error": "Pause helper unavailable"}, status=503)

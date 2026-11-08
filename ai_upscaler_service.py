@@ -372,6 +372,12 @@ async def ws_upscale_handler(request):
                     elif action == "stringing_clear_ignored":
                         st = stringing_watchdog.clear_ignored_defects(data.get("ip") or active_printer_ip)
                         await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
+                    elif action == "stringing_ignore_region":
+                        st = stringing_watchdog.ignore_defect_region(data.get("data") or data, data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
+                    elif action == "stringing_unignore_region":
+                        st = stringing_watchdog.unignore_defect_region(data.get("data") or data, data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
                     elif action == "pause_printer":
                         res = await loop.run_in_executor(telemetry_executor, stringing_watchdog.execute_pause, data.get("ip") or active_printer_ip)
                         await ws.send_str(json.dumps({"type": "pause_ack", "data": res}))
@@ -529,6 +535,46 @@ async def handle_stringing_clear_ignored(request):
         return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
 
 
+async def handle_stringing_ignore_region(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        data = {}
+        if request.can_read_body:
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+        if not data and "id" in request.query:
+            data["id"] = request.query.get("id")
+        if not data and "point_x" in request.query:
+            data["point_x"] = float(request.query.get("point_x"))
+            data["point_y"] = float(request.query.get("point_y"))
+        if not data and "x" in request.query:
+            data["x"] = float(request.query.get("x"))
+            data["y"] = float(request.query.get("y"))
+            data["w"] = float(request.query.get("w", 0.12))
+            data["h"] = float(request.query.get("h", 0.12))
+        return web.json_response(stringing_watchdog.ignore_defect_region(data, ip), headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_stringing_unignore_region(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        data = {}
+        if request.can_read_body:
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+        if not data and "id" in request.query:
+            data["id"] = request.query.get("id")
+        return web.json_response(stringing_watchdog.unignore_defect_region(data, ip), headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
 async def handle_stringing_snapshot(request):
     try:
         ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
@@ -626,6 +672,10 @@ app.router.add_get("/ai/stringing/reset_sensitivity", handle_stringing_reset_sen
 app.router.add_post("/ai/stringing/reset_sensitivity", handle_stringing_reset_sens)
 app.router.add_get("/ai/stringing/clear_ignored", handle_stringing_clear_ignored)
 app.router.add_post("/ai/stringing/clear_ignored", handle_stringing_clear_ignored)
+app.router.add_get("/ai/stringing/ignore_region", handle_stringing_ignore_region)
+app.router.add_post("/ai/stringing/ignore_region", handle_stringing_ignore_region)
+app.router.add_get("/ai/stringing/unignore_region", handle_stringing_unignore_region)
+app.router.add_post("/ai/stringing/unignore_region", handle_stringing_unignore_region)
 app.router.add_get("/ai/stringing/snapshot", handle_stringing_snapshot)
 app.router.add_get("/cronoprint/launch", handle_cronoprint_launch)
 app.router.add_post("/cronoprint/launch", handle_cronoprint_launch)
@@ -647,6 +697,8 @@ for _cors_route in (
     "/ai/stringing/ack",
     "/ai/stringing/reset_sensitivity",
     "/ai/stringing/clear_ignored",
+    "/ai/stringing/ignore_region",
+    "/ai/stringing/unignore_region",
     "/ai/stringing/snapshot",
 ):
     app.router.add_route("OPTIONS", _cors_route, handle_options)

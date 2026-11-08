@@ -114,6 +114,7 @@ class StringingConfig:
     confirm_seconds: Optional[float] = None
     cooldown_seconds: float = 30.0
     calibration_frames: int = 8
+    roi: Optional[Dict[str, float]] = None
 
     def effective_sensitivity(self, backoff_level: int = 0) -> str:
         base = self.sensitivity if self.sensitivity in SENSITIVITY_PRESETS else "balanced"
@@ -148,6 +149,7 @@ class StringingConfig:
             "threshold": round(base_thr, 2),
             "confirm_seconds": round(self.resolved_confirm_seconds(0), 1),
             "cooldown_seconds": round(self.cooldown_seconds, 1),
+            "roi": dict(self.roi) if self.roi else None,
         }
 
 
@@ -190,6 +192,7 @@ class _IpSession:
     paused_by_ai: bool = False
     last_printer_state: str = ""
     last_regions: List[Dict[str, Any]] = field(default_factory=list)
+    tracked_regions: List[Dict[str, Any]] = field(default_factory=list)
     ignored_defects: List[Dict[str, Any]] = field(default_factory=list)
     alert_info: Optional[Dict[str, Any]] = None
     alert_snapshot_jpeg: Optional[bytes] = None
@@ -197,10 +200,11 @@ class _IpSession:
     last_result: Dict[str, Any] = field(default_factory=dict)
 
 
-def _compute_roi_mask(h: int, w: int) -> np.ndarray:
+def _compute_roi_mask(h: int, w: int, custom_roi: Optional[Dict[str, float]] = None) -> np.ndarray:
     """
     Exclude outer enclosure edges where gantries/belts/bed metallic bezel sit
     and corner regions occupied by Creality Print native UI overlays (#aiBadge, .videoStatus).
+    If custom_roi is provided, strictly restrict the monitoring mask to that rectangle.
     """
     mask = np.ones((h, w), dtype=np.float32)
     top = max(14, int(round(h * 0.12)))
@@ -213,6 +217,23 @@ def _compute_roi_mask(h: int, w: int) -> np.ndarray:
     # Top-right overlay corner (#aiBadge + Creality icons) & top-left status pill
     mask[: int(round(h * 0.16)), int(round(w * 0.70)) :] = 0.0
     mask[: int(round(h * 0.14)), : int(round(w * 0.28))] = 0.0
+
+    if custom_roi and isinstance(custom_roi, dict):
+        try:
+            rx = max(0.0, min(0.95, float(custom_roi.get("x", 0.0))))
+            ry = max(0.0, min(0.95, float(custom_roi.get("y", 0.0))))
+            rw = max(0.04, min(1.0 - rx, float(custom_roi.get("w", 1.0))))
+            rh = max(0.04, min(1.0 - ry, float(custom_roi.get("h", 1.0))))
+            x1 = max(0, min(w - 1, int(round(rx * w))))
+            y1 = max(0, min(h - 1, int(round(ry * h))))
+            x2 = max(x1 + 1, min(w, int(round((rx + rw) * w))))
+            y2 = max(y1 + 1, min(h, int(round((ry + rh) * h))))
+            u_mask = np.zeros((h, w), dtype=np.float32)
+            u_mask[y1:y2, x1:x2] = 1.0
+            mask *= u_mask
+        except Exception:
+            pass
+
     return mask
 
 
@@ -340,6 +361,21 @@ def _compute_symmetrical_filament_map(rgb: np.ndarray) -> Tuple[np.ndarray, np.n
     full_orient[_PAD : h - _PAD, _PAD : w - _PAD] = best_orient
 
     return full_map, full_orient, sobel_mag, l_chan
+
+
+def _box_iou(b1: Dict[str, Any], b2: Dict[str, Any]) -> float:
+    try:
+        x1 = max(float(b1["x"]), float(b2["x"]))
+        y1 = max(float(b1["y"]), float(b2["y"]))
+        x2 = min(float(b1["x"]) + float(b1["w"]), float(b2["x"]) + float(b2["w"]))
+        y2 = min(float(b1["y"]) + float(b1["h"]), float(b2["y"]) + float(b2["h"]))
+        iw = max(0.0, x2 - x1)
+        ih = max(0.0, y2 - y1)
+        inter = iw * ih
+        union = (float(b1["w"]) * float(b1["h"])) + (float(b2["w"]) * float(b2["h"])) - inter
+        return (inter / union) if union > 0.0 else 0.0
+    except Exception:
+        return 0.0
 
 
 def _matches_ignored(box: Dict[str, Any], ignored_list: List[Dict[str, Any]], iou_thr: float = 0.14) -> Optional[Dict[str, Any]]:
@@ -549,6 +585,20 @@ class StringingWatchdog:
                 self.config.confirm_seconds = max(1.5, min(15.0, float(data["confirm_seconds"])))
             if "cooldown_seconds" in data and data["cooldown_seconds"] is not None:
                 self.config.cooldown_seconds = max(5.0, min(180.0, float(data["cooldown_seconds"])))
+            if "roi" in data:
+                r = data["roi"]
+                if isinstance(r, dict) and "x" in r and "y" in r and "w" in r and "h" in r:
+                    rx = max(0.0, min(0.95, float(r["x"])))
+                    ry = max(0.0, min(0.95, float(r["y"])))
+                    rw = max(0.04, min(1.0 - rx, float(r["w"])))
+                    rh = max(0.04, min(1.0 - ry, float(r["h"])))
+                    self.config.roi = {"x": round(rx, 4), "y": round(ry, 4), "w": round(rw, 4), "h": round(rh, 4)}
+                else:
+                    self.config.roi = None
+                with self._sessions_lock:
+                    for s in self._sessions.values():
+                        with s.lock:
+                            s.roi_mask = None
             return self.config.to_dict()
 
     def reset_baseline(self, ip: Optional[str] = None, clear_alert: bool = True, step_down: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
@@ -677,6 +727,139 @@ class StringingWatchdog:
             cfg = StringingConfig(**self.config.__dict__)
         with sess.lock:
             sess.ignored_defects.clear()
+            for tr in sess.tracked_regions:
+                tr["ignored"] = False
+                tr["defect_id"] = None
+            for lr in sess.last_regions:
+                lr["ignored"] = False
+                lr["defect_id"] = None
+            return self._build_status_locked(sess, cfg)
+
+    def ignore_defect_region(self, cand: Dict[str, Any], ip: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Mark a SPECIFIC stringing region/box as acknowledged/ignored.
+        `cand` can contain `id` (e.g. DEF-1 or BOX-1), bounding box coordinates (x, y, w, h),
+        or click point (point_x, point_y).
+        """
+        sess = self._get_session(ip)
+        cur_time = time.time() if now is None else float(now)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
+        with sess.lock:
+            target_region = None
+            cand_id = cand.get("id")
+
+            # 1. Search by ID
+            if cand_id:
+                for tr in sess.tracked_regions:
+                    if tr.get("id") == cand_id or tr.get("defect_id") == cand_id:
+                        target_region = tr
+                        break
+                if not target_region:
+                    for lr in sess.last_regions:
+                        if lr.get("id") == cand_id or lr.get("defect_id") == cand_id:
+                            target_region = lr
+                            break
+
+            # 2. Search by click point if provided (normalized coordinates 0.0-1.0)
+            if not target_region and ("point_x" in cand or "point_y" in cand or "cx" in cand):
+                px = float(cand.get("point_x", cand.get("cx", 0.0)))
+                py = float(cand.get("point_y", cand.get("cy", 0.0)))
+                for tr in sess.tracked_regions + sess.last_regions:
+                    tx1 = float(tr["x"])
+                    ty1 = float(tr["y"])
+                    tx2 = tx1 + float(tr["w"])
+                    ty2 = ty1 + float(tr["h"])
+                    if (tx1 - 0.02) <= px <= (tx2 + 0.02) and (ty1 - 0.02) <= py <= (ty2 + 0.02):
+                        target_region = tr
+                        break
+                if not target_region and ("point_x" in cand or "point_y" in cand):
+                    tw = float(cand.get("w", 0.14))
+                    th = float(cand.get("h", 0.14))
+                    target_region = {
+                        "x": max(0.0, min(1.0 - tw, px - tw * 0.5)),
+                        "y": max(0.0, min(1.0 - th, py - th * 0.5)),
+                        "w": tw,
+                        "h": th,
+                        "score": float(cand.get("score", 0.70)),
+                    }
+
+            # 3. Search by bounding box coordinates
+            if not target_region and "x" in cand and "y" in cand:
+                best_match = None
+                best_iou = 0.0
+                for tr in sess.tracked_regions + sess.last_regions:
+                    iou = _box_iou(cand, tr)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_match = tr
+                if best_match and best_iou >= 0.12:
+                    target_region = best_match
+                else:
+                    target_region = cand
+
+            if target_region:
+                idx = len(sess.ignored_defects) + 1
+                tw = float(target_region.get("w", 0.12))
+                th = float(target_region.get("h", 0.12))
+                tx = float(target_region.get("x", 0.0))
+                ty = float(target_region.get("y", 0.0))
+                tcx = tx + tw * 0.5
+                tcy = ty + th * 0.5
+
+                def_entry = {
+                    "id": f"DEF-{idx}",
+                    "x": round(tx, 4),
+                    "y": round(ty, 4),
+                    "w": round(tw, 4),
+                    "h": round(th, 4),
+                    "cx": round(tcx, 4),
+                    "cy": round(tcy, 4),
+                    "radius": round(math.hypot(tw, th) * 0.5, 4),
+                    "score": round(float(target_region.get("score", 0.0)), 3),
+                    "strands": int(target_region.get("strands", 1)),
+                    "acknowledged_at": round(cur_time, 2),
+                }
+                sess.ignored_defects.append(def_entry)
+
+                # Mark all matching tracked regions as ignored
+                for tr in sess.tracked_regions:
+                    if tr.get("id") == target_region.get("id") or _matches_ignored(tr, [def_entry]):
+                        tr["ignored"] = True
+                        tr["defect_id"] = def_entry["id"]
+
+                for lr in sess.last_regions:
+                    if lr.get("id") == target_region.get("id") or _matches_ignored(lr, [def_entry]):
+                        lr["ignored"] = True
+                        lr["defect_id"] = def_entry["id"]
+
+                # If no un-ignored defects remain, clear alert and reset warning streak
+                has_active_unignored = any(not r.get("ignored") for r in sess.last_regions)
+                if not has_active_unignored:
+                    sess.streak_sec = 0.0
+                    sess.ema_score = 0.0
+                    sess.ai_state = "monitoring"
+                    sess.alert_info = None
+
+            return self._build_status_locked(sess, cfg, cur_time=cur_time)
+
+    def unignore_defect_region(self, cand: Dict[str, Any], ip: Optional[str] = None) -> Dict[str, Any]:
+        """Remove a previously ignored defect zone so it can be monitored again."""
+        sess = self._get_session(ip)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
+        with sess.lock:
+            cand_id = cand.get("id") or cand.get("defect_id")
+            rem = [d for d in sess.ignored_defects if d.get("id") != cand_id]
+            sess.ignored_defects = rem
+            for tr in sess.tracked_regions:
+                if tr.get("defect_id") == cand_id or tr.get("id") == cand_id:
+                    tr["ignored"] = False
+                    tr["defect_id"] = None
+            for lr in sess.last_regions:
+                if lr.get("defect_id") == cand_id or lr.get("id") == cand_id:
+                    lr["ignored"] = False
+                    lr["defect_id"] = None
             return self._build_status_locked(sess, cfg)
 
     def get_status(self, ip: Optional[str] = None) -> Dict[str, Any]:
@@ -740,7 +923,7 @@ class StringingWatchdog:
         sh, sw = rgb_small.shape[:2]
 
         if sess.roi_mask is None or sess.roi_mask_shape != (sh, sw):
-            sess.roi_mask = _compute_roi_mask(sh, sw)
+            sess.roi_mask = _compute_roi_mask(sh, sw, custom_roi=self.config.roi)
             sess.roi_mask_shape = (sh, sw)
 
         filament_map, best_orient, sobel_mag, l_chan = _compute_symmetrical_filament_map(rgb_small)
@@ -878,6 +1061,15 @@ class StringingWatchdog:
             y1 = y0 + tile_h
             for x0 in range(side_crop, sw - side_crop - tile_w + 1, step_x):
                 x1 = x0 + tile_w
+                if self.config.roi:
+                    tcx = (x0 + tile_w * 0.5) / float(sw)
+                    tcy = (y0 + tile_h * 0.5) / float(sh)
+                    rx = float(self.config.roi.get("x", 0.0))
+                    ry = float(self.config.roi.get("y", 0.0))
+                    rw = float(self.config.roi.get("w", 1.0))
+                    rh = float(self.config.roi.get("h", 1.0))
+                    if not (rx <= tcx <= (rx + rw) and ry <= tcy <= (ry + rh)):
+                        continue
                 t_valid = valid[y0:y1, x0:x1]
                 if t_valid.mean() < 0.45:
                     continue
@@ -1027,6 +1219,122 @@ class StringingWatchdog:
 
         return frame_score, regions, mean_luma, total_strands, len(raw_boxes)
 
+    def _update_tracked_regions(
+        self,
+        sess: _IpSession,
+        raw_candidates: List[Dict[str, Any]],
+        cur_time: float,
+        dt: float,
+        eff_thr: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Temporal Region Tracker:
+        Matches candidate boxes across consecutive frames, applies EMA smoothing to coordinates
+        and scores, requires at least 2 consecutive frames before appearing on the HUD (preventing
+        transient 1-frame specular flash / false-positive spikes), and holds confirmed defects
+        for ~1.6s so valid detections do not abruptly vanish every 0.5s.
+        """
+        for tr in sess.tracked_regions:
+            tr["_matched"] = False
+
+        for cand in raw_candidates:
+            cand_cx = float(cand["x"]) + float(cand["w"]) * 0.5
+            cand_cy = float(cand["y"]) + float(cand["h"]) * 0.5
+            best_tr = None
+            best_iou = 0.0
+
+            for tr in sess.tracked_regions:
+                if tr.get("_matched"):
+                    continue
+                iou = _box_iou(cand, tr)
+                tr_cx = float(tr["x"]) + float(tr["w"]) * 0.5
+                tr_cy = float(tr["y"]) + float(tr["h"]) * 0.5
+                dist = math.hypot(cand_cx - tr_cx, cand_cy - tr_cy)
+                if iou >= 0.16 or dist <= 0.09:
+                    if iou > best_iou or best_tr is None:
+                        best_iou = iou
+                        best_tr = tr
+
+            if best_tr is not None:
+                best_tr["_matched"] = True
+                best_tr["frames_seen"] = int(best_tr.get("frames_seen", 1)) + 1
+                best_tr["consecutive_misses"] = 0
+                best_tr["last_seen_ts"] = cur_time
+                # EMA score smoothing: 40% current frame, 60% historical
+                best_tr["score"] = round(0.40 * float(cand["score"]) + 0.60 * float(best_tr["score"]), 3)
+                # EMA bbox smoothing to eliminate jitter
+                best_tr["x"] = round(0.35 * float(cand["x"]) + 0.65 * float(best_tr["x"]), 4)
+                best_tr["y"] = round(0.35 * float(cand["y"]) + 0.65 * float(best_tr["y"]), 4)
+                best_tr["w"] = round(0.35 * float(cand["w"]) + 0.65 * float(best_tr["w"]), 4)
+                best_tr["h"] = round(0.35 * float(cand["h"]) + 0.65 * float(best_tr["h"]), 4)
+                best_tr["strands"] = max(int(best_tr.get("strands", 0)), int(cand.get("strands", 0)))
+                if cand.get("ignored"):
+                    best_tr["ignored"] = True
+                    if cand.get("defect_id"):
+                        best_tr["defect_id"] = cand["defect_id"]
+            else:
+                track_seq = getattr(sess, "_track_seq", 0) + 1
+                sess._track_seq = track_seq
+                new_tr = {
+                    "id": f"BOX-{track_seq}",
+                    "x": float(cand["x"]),
+                    "y": float(cand["y"]),
+                    "w": float(cand["w"]),
+                    "h": float(cand["h"]),
+                    "score": float(cand["score"]),
+                    "strands": int(cand.get("strands", 1)),
+                    "frames_seen": 1,
+                    "consecutive_misses": 0,
+                    "first_seen_ts": cur_time,
+                    "last_seen_ts": cur_time,
+                    "ignored": bool(cand.get("ignored")),
+                    "defect_id": cand.get("defect_id"),
+                    "_matched": True,
+                }
+                sess.tracked_regions.append(new_tr)
+
+        # Decay unmatched tracked regions
+        for tr in sess.tracked_regions:
+            if not tr.get("_matched"):
+                tr["consecutive_misses"] = int(tr.get("consecutive_misses", 0)) + 1
+                tr["score"] = round(float(tr["score"]) * 0.84, 3)
+
+        # Prune dead/stale tracks (> 1.8s or > 3 misses)
+        survivors: List[Dict[str, Any]] = []
+        for tr in sess.tracked_regions:
+            tr.pop("_matched", None)
+            age = cur_time - float(tr.get("last_seen_ts", cur_time))
+            if age <= 1.8 and int(tr.get("consecutive_misses", 0)) <= 3:
+                survivors.append(tr)
+        sess.tracked_regions = survivors
+
+        # Select regions for HUD display / status:
+        # Require frames_seen >= 2 to suppress 1-frame spikes, OR ignored==True,
+        # OR in alert/warning states where defect is being confirmed.
+        output: List[Dict[str, Any]] = []
+        for tr in sess.tracked_regions:
+            is_ignored = bool(tr.get("ignored"))
+            seen_count = int(tr.get("frames_seen", 0))
+            score_val = float(tr.get("score", 0.0))
+            is_alert = (sess.streak_sec > 0.4) or sess.paused_by_ai or (sess.alert_info is not None)
+
+            if (seen_count >= 2 or is_ignored or is_alert) and score_val >= max(0.35, eff_thr * 0.50):
+                output.append({
+                    "id": tr["id"],
+                    "x": round(float(tr["x"]), 4),
+                    "y": round(float(tr["y"]), 4),
+                    "w": round(float(tr["w"]), 4),
+                    "h": round(float(tr["h"]), 4),
+                    "score": round(score_val, 3),
+                    "strands": int(tr.get("strands", 1)),
+                    "ignored": is_ignored,
+                    "defect_id": tr.get("defect_id"),
+                    "frames_seen": seen_count,
+                })
+
+        output.sort(key=lambda r: float(r["score"]), reverse=True)
+        return output[:6]
+
     def _build_status_locked(self, sess: _IpSession, cfg: StringingConfig, cur_time: Optional[float] = None) -> Dict[str, Any]:
         confirm_s = cfg.resolved_confirm_seconds(sess.backoff_level)
         eff_sens = cfg.effective_sensitivity(sess.backoff_level)
@@ -1129,9 +1437,10 @@ class StringingWatchdog:
             eff_confirm = cfg.resolved_confirm_seconds(sess.backoff_level)
 
             # Compute CV vision score
-            frame_score, regions, mean_luma, total_strands, anomaly_tiles = self._score_frame_cv(
+            frame_score, raw_regions, mean_luma, total_strands, anomaly_tiles = self._score_frame_cv(
                 sess, frame_rgb, ctx, cur_time, eff_thr=eff_thr
             )
+            regions = self._update_tracked_regions(sess, raw_regions, cur_time, dt, eff_thr)
             infer_ms = (time.perf_counter() - t0) * 1000.0
             sess.frames_analyzed += 1
             sess.avg_infer_ms = infer_ms if sess.frames_analyzed == 1 else (0.85 * sess.avg_infer_ms + 0.15 * infer_ms)
