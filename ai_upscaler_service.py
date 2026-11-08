@@ -21,7 +21,9 @@ import os
 import struct
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 import aiohttp
 import cv2
@@ -29,34 +31,56 @@ import numpy as np
 import onnxruntime as ort
 from aiohttp import web
 
+from printer_telemetry import PrinterTelemetryTracker, validate_printer_ip
+from stringing_detector import StringingWatchdog, context_from_telemetry, decode_image_bytes
+
 HOST = "127.0.0.1"
 PORT = 8088
 BASE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE, "models", "realesr_animevideo_v3_fused.onnx")
 MOONRAKER_URL = "http://192.168.78.50:7125"
+DEFAULT_PRINTER_IP = urllib.parse.urlparse(MOONRAKER_URL).hostname or "192.168.78.50"
 WORKERS = 3
 
-print("=" * 65)
-print("Creality Real-ESRGAN AI Engine (RTX 4070, fused GPU pipeline)")
-print("=" * 65)
-
-if not os.path.exists(MODEL_PATH):
-    raise SystemExit("Fused model missing: run build_fused_model.py first.")
-
-so = ort.SessionOptions()
-so.enable_mem_pattern = False  # required by the DirectML provider
-so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-session = ort.InferenceSession(
-    MODEL_PATH, so, providers=[("DmlExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
-)
-print(f"[AI] Providers: {session.get_providers()}")
+session = None
 session_lock = threading.Lock()  # GPU queue is serialised, CPU stages run in parallel
-
-for _w, _h in ((480, 270), (640, 360), (960, 540)):
-    session.run(None, {"input_u8": np.zeros((1, _h, _w, 3), np.uint8)})
-print("[AI] Warmup complete.")
-
 executor = ThreadPoolExecutor(max_workers=WORKERS)
+telemetry_executor = ThreadPoolExecutor(max_workers=3)
+telemetry_tracker = PrinterTelemetryTracker(default_ip=DEFAULT_PRINTER_IP, moonraker_port=7125)
+stringing_watchdog = StringingWatchdog(default_ip=DEFAULT_PRINTER_IP, moonraker_port=7125)
+active_printer_ip = DEFAULT_PRINTER_IP
+_stringing_frame_lock = threading.Lock()
+_last_stringing_capture = 0.0
+_latest_stringing_rgb = None
+STARTED_AT = time.time()
+_shutdown_event: Optional[asyncio.Event] = None
+
+
+def init_ai_session():
+    global session
+    if session is not None:
+        return session
+
+    print("=" * 65)
+    print("Creality Real-ESRGAN AI Engine (RTX 4070, fused GPU pipeline)")
+    print("=" * 65)
+
+    if not os.path.exists(MODEL_PATH):
+        raise SystemExit("Fused model missing: run build_fused_model.py first.")
+
+    so = ort.SessionOptions()
+    so.enable_mem_pattern = False  # required by the DirectML provider
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    sess = ort.InferenceSession(
+        MODEL_PATH, so, providers=[("DmlExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+    )
+    print(f"[AI] Providers: {sess.get_providers()}")
+
+    for _w, _h in ((480, 270), (640, 360), (960, 540)):
+        sess.run(None, {"input_u8": np.zeros((1, _h, _w, 3), np.uint8)})
+    print("[AI] Warmup complete.")
+    session = sess
+    return session
 
 latest_jpeg = None
 current_printer_speed = 100
@@ -72,6 +96,7 @@ stats = {
 
 # Tunable from the UI. Defaults are deliberately neutral.
 ai_config = {
+    "upscale_enabled": True,  # True = Real-ESRGAN GPU inference; False = native video (only stringing AI if active)
     "target_res": "1080p",  # output resolution: 720p / 1080p / 1440p
     "ai_blend": 1.0,        # 0 = plain resize of the camera frame, 1 = full AI output
     "hdr_shadows": 0.0,     # 0..1 shadow lift, only affects dark pixels
@@ -143,25 +168,45 @@ def process_frame(payload: bytes):
     stats["output_res"] = f"{out.shape[1]}x{out.shape[0]}"
     stats["frames_processed"] += 1
 
-    global latest_jpeg
+    global latest_jpeg, _last_stringing_capture, _latest_stringing_rgb
     latest_jpeg = jpeg
+
+    if stringing_watchdog.config.enabled:
+        now_pf = time.monotonic()
+        if (now_pf - _last_stringing_capture) >= 0.38:
+            with _stringing_frame_lock:
+                if (now_pf - _last_stringing_capture) >= 0.38:
+                    _last_stringing_capture = now_pf
+                    sh_cur, sw_cur = out.shape[:2]
+                    if sw_cur > 640:
+                        nh = max(64, int(round(sh_cur * (640.0 / float(sw_cur)))))
+                        _latest_stringing_rgb = cv2.resize(out, (640, nh), interpolation=cv2.INTER_AREA)
+                    else:
+                        _latest_stringing_rgb = out.copy()
+
     header = struct.pack("<IHH", seq, min(int(infer_ms), 65535), min(int(total_ms), 65535))
     return header + jpeg
 
 
-async def set_moonraker_speed(speed_percent: int):
+def _moonraker_base_url(raw_ip: Optional[str] = None) -> str:
+    ip = validate_printer_ip(raw_ip, DEFAULT_PRINTER_IP)
+    return f"http://{ip}:7125"
+
+
+async def set_moonraker_speed(speed_percent: int, raw_ip: Optional[str] = None):
     global current_printer_speed
     speed_percent = max(25, min(190, int(speed_percent)))
     current_printer_speed = speed_percent
+    base_url = _moonraker_base_url(raw_ip)
     try:
         async with aiohttp.ClientSession() as client:
             async with client.post(
-                f"{MOONRAKER_URL}/printer/gcode/script",
+                f"{base_url}/printer/gcode/script",
                 json={"script": f"M220 S{speed_percent}"},
                 timeout=aiohttp.ClientTimeout(total=2.0),
             ) as resp:
                 if resp.status == 200:
-                    print(f"[Moonraker] M220 S{speed_percent} sent.")
+                    print(f"[Moonraker] M220 S{speed_percent} sent to {base_url}.")
                     return True
                 print(f"[Moonraker] speed status {resp.status}: {await resp.text()}")
     except Exception as e:
@@ -169,12 +214,13 @@ async def set_moonraker_speed(speed_percent: int):
     return False
 
 
-async def get_moonraker_speed():
+async def get_moonraker_speed(raw_ip: Optional[str] = None):
     global current_printer_speed
+    base_url = _moonraker_base_url(raw_ip)
     try:
         async with aiohttp.ClientSession() as client:
             async with client.get(
-                f"{MOONRAKER_URL}/printer/objects/query?gcode_move",
+                f"{base_url}/printer/objects/query?gcode_move",
                 timeout=aiohttp.ClientTimeout(total=2.0),
             ) as resp:
                 if resp.status == 200:
@@ -187,6 +233,8 @@ async def get_moonraker_speed():
 
 
 def apply_config(data: dict):
+    if "upscale_enabled" in data:
+        ai_config["upscale_enabled"] = bool(data["upscale_enabled"])
     if "target_res" in data and data["target_res"] in TARGET_HEIGHT:
         ai_config["target_res"] = data["target_res"]
     for key in ("ai_blend", "hdr_shadows", "sharpness"):
@@ -196,7 +244,31 @@ def apply_config(data: dict):
         ai_config["jpeg_quality"] = max(50, min(98, int(data["jpeg_quality"])))
 
 
+def _extract_rgb_for_stringing(data: bytes) -> Optional[np.ndarray]:
+    try:
+        w = struct.unpack_from("<H", data, 4)[0]
+        h = struct.unpack_from("<H", data, 6)[0]
+        raw_pixels = np.frombuffer(data, dtype=np.uint8, offset=8)
+        if raw_pixels.size == w * h * 4:
+            rgba = raw_pixels.reshape((h, w, 4))
+            rgb = cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB)
+            if w > 640:
+                nh = max(64, int(round(h * (640.0 / float(w)))))
+                rgb = cv2.resize(rgb, (640, nh), interpolation=cv2.INTER_AREA)
+            return rgb
+    except Exception:
+        pass
+    return None
+
+
+def _analyze_frame_with_telemetry(rgb: np.ndarray, ip: str) -> dict:
+    tel = telemetry_tracker.poll(ip)
+    ctx = context_from_telemetry(tel, fallback_ip=ip)
+    return stringing_watchdog.analyze_frame(rgb, ip=ip, ctx=ctx)
+
+
 async def ws_upscale_handler(request):
+    global active_printer_ip
     ws = web.WebSocketResponse(max_msg_size=32 * 1024 * 1024)
     await ws.prepare(request)
     stats["active_clients"] += 1
@@ -204,8 +276,46 @@ async def ws_upscale_handler(request):
 
     loop = asyncio.get_running_loop()
     fps = {"count": 0, "t": time.time()}
+    stringing_state = {"busy": False, "last_push": 0.0}
+
+    async def maybe_run_stringing():
+        global _latest_stringing_rgb
+        if stringing_state["busy"] or not stringing_watchdog.config.enabled:
+            return
+        now_m = time.monotonic()
+        if (now_m - stringing_state["last_push"]) < 0.38:
+            return
+        with _stringing_frame_lock:
+            rgb_snap = _latest_stringing_rgb
+            _latest_stringing_rgb = None
+        if rgb_snap is None:
+            return
+        stringing_state["busy"] = True
+        stringing_state["last_push"] = now_m
+        try:
+            res = await loop.run_in_executor(telemetry_executor, _analyze_frame_with_telemetry, rgb_snap, active_printer_ip)
+            if not ws.closed:
+                await ws.send_str(json.dumps({"type": "stringing_status", "data": res}))
+        except Exception as exc:
+            print(f"[StringingAI] WS inspect error: {exc}")
+        finally:
+            stringing_state["busy"] = False
 
     async def handle_frame(data: bytes):
+        global _latest_stringing_rgb, _last_stringing_capture
+        # When upscaling is disabled by the client, skip heavy Real-ESRGAN GPU inference completely
+        if not ai_config.get("upscale_enabled", True):
+            if stringing_watchdog.config.enabled and not stringing_state["busy"]:
+                now_m = time.monotonic()
+                if (now_m - _last_stringing_capture) >= 0.35:
+                    _last_stringing_capture = now_m
+                    rgb_frame = await loop.run_in_executor(telemetry_executor, _extract_rgb_for_stringing, data)
+                    if rgb_frame is not None:
+                        with _stringing_frame_lock:
+                            _latest_stringing_rgb = rgb_frame
+                        asyncio.ensure_future(maybe_run_stringing())
+            return
+
         try:
             result = await loop.run_in_executor(executor, process_frame, data)
         except Exception as e:
@@ -219,6 +329,8 @@ async def ws_upscale_handler(request):
             stats["fps"] = round(fps["count"] / (now - fps["t"]), 1)
             fps["count"], fps["t"] = 0, now
         await ws.send_bytes(result)
+        if _latest_stringing_rgb is not None and not stringing_state["busy"]:
+            asyncio.ensure_future(maybe_run_stringing())
 
     try:
         async for msg in ws:
@@ -228,11 +340,31 @@ async def ws_upscale_handler(request):
                 try:
                     data = json.loads(msg.data)
                     action = data.get("action")
+                    if data.get("ip"):
+                        active_printer_ip = validate_printer_ip(data.get("ip"), DEFAULT_PRINTER_IP)
                     if action == "set_speed":
-                        await set_moonraker_speed(data.get("speed", 100))
+                        await set_moonraker_speed(data.get("speed", 100), data.get("ip"))
                         await ws.send_str(json.dumps({"type": "speed_ack", "speed": current_printer_speed}))
                     elif action == "get_speed":
-                        await ws.send_str(json.dumps({"type": "speed_update", "speed": await get_moonraker_speed()}))
+                        spd = await get_moonraker_speed(data.get("ip"))
+                        await ws.send_str(json.dumps({"type": "speed_update", "speed": spd}))
+                    elif action == "get_telemetry":
+                        tel = await loop.run_in_executor(telemetry_executor, telemetry_tracker.poll, data.get("ip"))
+                        await ws.send_str(json.dumps({"type": "telemetry", "data": tel}))
+                    elif action == "get_stringing":
+                        st = stringing_watchdog.get_status(data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
+                    elif action == "stringing_config":
+                        cfg = stringing_watchdog.update_config(data.get("config") or data)
+                        await ws.send_str(json.dumps({"type": "stringing_config", "config": cfg}))
+                    elif action == "stringing_reset":
+                        st = stringing_watchdog.reset_baseline(data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
+                    elif action == "pause_printer":
+                        res = await loop.run_in_executor(telemetry_executor, stringing_watchdog.execute_pause, data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "pause_ack", "data": res}))
+                    elif action == "set_printer_ip":
+                        await ws.send_str(json.dumps({"type": "printer_ip_ack", "ip": active_printer_ip}))
                     else:
                         apply_config(data)
                         await ws.send_str(json.dumps({"type": "config", "config": ai_config, "stats": stats}))
@@ -244,37 +376,213 @@ async def ws_upscale_handler(request):
     return ws
 
 
-CORS = {"Access-Control-Allow-Origin": "*"}
+CORS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+}
+
+
+async def handle_options(request):
+    return web.Response(status=204, headers=CORS)
 
 
 async def handle_status(request):
-    return web.json_response({"stats": stats, "config": ai_config, "speed": current_printer_speed}, headers=CORS)
+    return web.json_response(
+        {
+            "ok": True,
+            "mode": "full_gpu",
+            "pid": os.getpid(),
+            "uptime_sec": round(max(0.0, time.time() - STARTED_AT), 1),
+            "telemetry_only": False,
+            "gpu_upscaler": True,
+            "upscale_enabled": bool(ai_config.get("upscale_enabled", True)),
+            "stringing_available": True,
+            "providers": session.get_providers() if session is not None else [],
+            "stats": stats,
+            "config": ai_config,
+            "speed": current_printer_speed,
+            "stringing": stringing_watchdog.get_status(active_printer_ip),
+        },
+        headers=CORS,
+    )
 
 
 async def handle_set_speed(request):
     try:
-        ok = await set_moonraker_speed(int(request.query.get("speed", 100)))
+        ip = request.query.get("ip")
+        ok = await set_moonraker_speed(int(request.query.get("speed", 100)), ip)
         return web.json_response({"status": "ok" if ok else "error", "speed": current_printer_speed}, headers=CORS)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400, headers=CORS)
 
 
 async def handle_get_speed(request):
-    return web.json_response({"speed": await get_moonraker_speed()}, headers=CORS)
+    try:
+        ip = request.query.get("ip")
+        return web.json_response({"speed": await get_moonraker_speed(ip)}, headers=CORS)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_telemetry(request):
+    global active_printer_ip
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), DEFAULT_PRINTER_IP)
+        active_printer_ip = ip
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(telemetry_executor, telemetry_tracker.poll, ip)
+        payload["stringing"] = stringing_watchdog.get_status(ip)
+        return web.json_response(payload, headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers=CORS)
+
+
+async def handle_stringing_status(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        return web.json_response(stringing_watchdog.get_status(ip), headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_stringing_analyze(request):
+    global active_printer_ip
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        active_printer_ip = ip
+        raw_bytes = await request.read()
+        rgb = decode_image_bytes(raw_bytes)
+        if rgb is None:
+            return web.json_response({"ok": False, "error": "Invalid or empty image payload"}, status=400, headers=CORS)
+        assume_printing = request.query.get("assume_printing") in ("1", "true")
+        loop = asyncio.get_running_loop()
+
+        def _run():
+            tel = telemetry_tracker.poll(ip)
+            ctx = context_from_telemetry(tel, fallback_ip=ip)
+            return stringing_watchdog.analyze_frame(rgb, ip=ip, ctx=ctx, assume_printing_if_no_ctx=assume_printing)
+
+        res = await loop.run_in_executor(telemetry_executor, _run)
+        return web.json_response(res, headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500, headers=CORS)
+
+
+async def handle_stringing_config(request):
+    try:
+        if request.method == "POST":
+            data = await request.json()
+            cfg = stringing_watchdog.update_config(data or {})
+        else:
+            cfg = stringing_watchdog.get_config()
+        return web.json_response({"ok": True, "config": cfg}, headers=CORS)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_stringing_reset(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        return web.json_response(stringing_watchdog.reset_baseline(ip), headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_stringing_snapshot(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        alert_only = request.query.get("alert_only") in ("1", "true", "yes")
+        jpeg = stringing_watchdog.get_snapshot(ip, alert_only=alert_only)
+        if not jpeg:
+            return web.json_response({"ok": False, "error": "No snapshot available yet"}, status=404, headers=CORS)
+        snap_headers = dict(CORS)
+        snap_headers["Cache-Control"] = "no-store"
+        return web.Response(body=jpeg, content_type="image/jpeg", headers=snap_headers)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_printer_pause(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(telemetry_executor, stringing_watchdog.execute_pause, ip)
+        return web.json_response(res, headers=CORS)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
 
 
 async def handle_snapshot(request):
     if latest_jpeg is None:
-        return web.Response(status=503, text="No AI frame ready yet")
+        return web.Response(status=503, text="No AI frame ready yet", headers=CORS)
     return web.Response(body=latest_jpeg, content_type="image/jpeg", headers=CORS)
+
+
+async def handle_server_stop(request):
+    global _shutdown_event
+    loop = asyncio.get_running_loop()
+    if _shutdown_event is not None:
+        loop.call_later(0.15, _shutdown_event.set)
+    return web.json_response(
+        {"ok": True, "stopping": True, "pid": os.getpid(), "mode": "full_gpu"},
+        headers=CORS,
+    )
 
 
 app = web.Application()
 app.router.add_get("/ws_upscale", ws_upscale_handler)
 app.router.add_get("/status", handle_status)
 app.router.add_get("/snapshot", handle_snapshot)
+app.router.add_post("/server/stop", handle_server_stop)
 app.router.add_get("/printer/set_speed", handle_set_speed)
 app.router.add_get("/printer/get_speed", handle_get_speed)
+app.router.add_get("/printer/telemetry", handle_telemetry)
+app.router.add_post("/printer/pause", handle_printer_pause)
+app.router.add_get("/ai/stringing/status", handle_stringing_status)
+app.router.add_post("/ai/stringing/analyze", handle_stringing_analyze)
+app.router.add_get("/ai/stringing/config", handle_stringing_config)
+app.router.add_post("/ai/stringing/config", handle_stringing_config)
+app.router.add_get("/ai/stringing/reset", handle_stringing_reset)
+app.router.add_post("/ai/stringing/reset", handle_stringing_reset)
+app.router.add_get("/ai/stringing/snapshot", handle_stringing_snapshot)
+for _cors_route in (
+    "/status",
+    "/server/stop",
+    "/printer/telemetry",
+    "/printer/get_speed",
+    "/printer/set_speed",
+    "/printer/pause",
+    "/ai/stringing/status",
+    "/ai/stringing/analyze",
+    "/ai/stringing/config",
+    "/ai/stringing/reset",
+    "/ai/stringing/snapshot",
+):
+    app.router.add_route("OPTIONS", _cors_route, handle_options)
+
+
+async def _serve_app():
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, HOST, PORT, reuse_address=True)
+    await site.start()
+    print(f"======== Running on http://{HOST}:{PORT} ========")
+    try:
+        await _shutdown_event.wait()
+    finally:
+        await runner.cleanup()
+
 
 if __name__ == "__main__":
-    web.run_app(app, host=HOST, port=PORT)
+    init_ai_session()
+    try:
+        asyncio.run(_serve_app())
+    except KeyboardInterrupt:
+        pass

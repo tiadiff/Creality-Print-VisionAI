@@ -14,13 +14,16 @@
         By intercepting the native video pipeline directly within Creality Print's embedded Chromium runtime, Creality Vision AI bypasses lossy decoding layers and feeds uncompressed frames into a customized <b>DirectML GPU-accelerated Real-ESRGAN</b> neural network running in Direct3D 12 VRAM. The system dynamically upscales chamber video to <b>1080p / 1440p at up to 60+ FPS</b> while executing real-time <b>O(1) HDR Shadow Recovery</b> to reveal critical first-layer details and surface artifacts on dark filaments (black PLA, PETG, ASA, and Carbon Fiber composites).
       </p>
       <p>
-        Additionally, the suite injects a micro-precision feedrate tuning slider directly into the native Creality Print interface, communicating bi-directionally with the printer via low-overhead WebSockets and Moonraker/Klipper G-code APIs.
+        Additionally, the suite injects both a micro-precision feedrate tuning slider (committing speed changes cleanly on click release), a live extrusion telemetry panel positioned cleanly alongside Creality Print's native fan control card, and a real-time <b>Stringing &amp; Spaghetti AI Watchdog</b> with automated print pause protection directly into the Creality Print interface. The telemetry engine correlates Klipper's real-time kinematic state with bounded HTTP Range slices of the active G-code file to identify exact slicer feature types (outer/inner walls, infill, ironing, support, bridges) alongside real nozzle extrusion speed in mm/s, filament feed velocity, and volumetric flow rate.
       </p>
       <ul>
         <li><b>Zero-Copy DirectML Tensor Pipeline:</b> Normalization, layout transposition, clipping, and quantisation fused directly into the ONNX graph executed on GPU VRAM.</li>
         <li><b>Hardware V-Sync Frame Synchronization:</b> Native <code>requestVideoFrameCallback()</code> stream tap eliminating frame tearing, duplicated inference, and CPU polling.</li>
         <li><b>Specialized HDR Shadow Lift:</b> Non-linear quadratic attenuation LUT recovering underexposed nozzle and bed zones without highlight clipping.</li>
-        <li><b>Dual-Path Micro-Feedrate Control:</b> Direct Creality OS socket communication (port 9999) with seamless Moonraker/Klipper G-code bridge (port 7125).</li>
+        <li><b>Live Feature &amp; Extrusion Telemetry:</b> Synchronized Klipper <code>motion_report</code> + G-code <code>;TYPE:</code> lookup displaying active feature type, nozzle speed (mm/s), and volumetric flow (mm³/s) side-by-side next to the native fan control widget, with automatic direct port-9999 fallback.</li>
+        <li><b>AI Stringing &amp; Spaghetti Watchdog + Auto-Pause:</b> Real-time multi-orientation filament ridge computer-vision detector ([<code>stringing_detector.py</code>](stringing_detector.py)) with moving-printhead masking, LED exposure-jump recalibration, sustained confirmation window, live camera HUD bounding boxes, snapshot evidence capture, and dual-path automatic pause via Moonraker (port 7125) and Creality OS WebSocket (port 9999).</li>
+        <li><b>In-App AI Server Lifecycle Controller:</b> Lightweight zero-dependency local supervisor ([<code>server_manager.py</code>](server_manager.py) on <code>127.0.0.1:8089</code>) allowing Creality Print to monitor uptime/mode/PID, start, stop, restart, switch GPU/CPU engine modes, and inspect logs directly inside the native UI.</li>
+        <li><b>Dual-Path Micro-Feedrate Control:</b> Release-committed fine speed slider communicating directly via Creality OS WebSocket (port 9999) or Moonraker/Klipper G-code bridge (port 7125).</li>
       </ul>
     </td>
   </tr>
@@ -335,9 +338,9 @@ When the user adjusts the custom micro-precision print speed slider in the Creal
   ```
   *(Note: Setting `speedMode: 1` triggers Silent mode at 25%, while `speedMode: 0` activates custom feedrate percentages up to 190%).*
 
-#### Path B: Moonraker / Klipper G-Code Dispatch
+#### Path B: Moonraker / Klipper G-Code Dispatch & Synchronized Telemetry
 * **Port:** `7125` (HTTP/REST)
-* **Payload:** Direct dispatch to Klipper motion queue:
+* **Speed Override:** Sent only on pointer release and only when the slider value changes:
   ```http
   POST /printer/gcode/script HTTP/1.1
   Host: 192.168.78.50:7125
@@ -345,6 +348,81 @@ When the user adjusts the custom micro-precision print speed slider in the Creal
 
   {"script": "M220 S125"}
   ```
+* **Synchronized Nozzle Activity & Extrusion Telemetry (`GET /printer/telemetry?ip=<addr>`):**
+  Queries Moonraker (`motion_report`, `virtual_sdcard`, `gcode_move`, `print_stats`, `exclude_object`) and fetches bounded rolling HTTP `Range` chunks from `/server/files/gcodes/<filename>`. By correlating `motion_report.live_position`, extrusion ratio (`live_extruder_velocity / live_velocity`), and monotonic G-code offset progression across linear (`G0`/`G1`) and arc (`G2`/`G3`) moves, [`printer_telemetry.py`](printer_telemetry.py) compensates for Klipper's lookahead buffer and accurately resolves the active `;TYPE:` feature alongside live print/extrusion speed (mm/s), filament feed rate (mm/s), and volumetric flow rate (mm³/s). The injected card mounts side-by-side in Creality Print's Row 2 container right next to the fan control card (`Modello di ventilatore`), gracefully falling back to passive telemetry on Creality's WebSocket port `9999` when port `8088` is offline.
+
+### 3. Real-Time Stringing AI & Automatic Print Pause (`stringing_detector.py`)
+Creality Vision AI continuously analyzes decoded chamber frames from the SparkX i7 camera (~2.3 Hz in background threads) using [`stringing_detector.py`](stringing_detector.py):
+* **Multi-Orientation Symmetrical Ridge Extractor:** Combines luma + CIE `Lab` chroma channels with CLAHE shadow normalization and dual-scale ($d=2,3$) directional response across 6 orientations ($0^\circ\text{--}150^\circ$), suppressing step-edge walls, rectilinear infill, and solid tree supports while isolating thin extruded wisps, cobwebs, and spaghetti loops.
+* **Temporal Printhead Exclusion & Exposure Adaptation:** Segments moving solid blocks (printhead shroud/carriage) using eroded frame diffs so transient head sweeps never trigger false positives, freezes the reference ridge baseline while an anomaly is active, and automatically recalibrates on chamber LED toggles ($|\Delta \bar{L}| > 16$).
+* **Context-Aware Sustained Confirmation & Dual-Path Auto-Pause:** Suspends detection during `homing`/`heating`/`preparing` states and requires sustained confirmation (`low`: 6.0 s, `balanced`: 4.5 s, `high`: 3.0 s) before triggering an immediate race-checked pause:
+  * **Primary Path:** Queries Moonraker `print_stats` / `pause_resume` and executes `POST http://<printer-ip>:7125/printer/print/pause` (`gcode_macro PAUSE` retract + safe Z park).
+  * **UI Fallback Path:** Emits `{"method":"set","params":{"pause":1}}` over Creality's native WebSocket (`ws://<printer-ip>:9999`) if Moonraker returns an unreachable state.
+* **UI Controls & Evidence Snapshot (`http://127.0.0.1:8088/ai/stringing/*`):** Draws aspect-accurate bounding boxes (`#agyStringingCanvas`), displays a live status badge + confirmation bar top-left of the video (`#agyStringingHost`), integrates sensitivity/auto-pause settings inside `#aiPanel`, and saves an annotated evidence JPEG (`/ai/stringing/snapshot`) whenever an alert or pause fires. Both `ai_upscaler_service.py` (GPU + Stringing WS) and standalone `printer_telemetry.py` (CPU Telemetry + Stringing REST on port `8088`) serve the full watchdog pipeline.
+
+### 4. Local Server Lifecycle Supervisor (`server_manager.py`, Port `8089`)
+To let Creality Print inspect status, start, stop, and restart the `:8088` AI backend without external terminals:
+* **Localhost Control Daemon:** [`server_manager.py`](server_manager.py) runs silently under `pythonw.exe` on `127.0.0.1:8089` using only the Python standard library, enforcing loopback `Origin` checks and capturing child logs under `%LOCALAPPDATA%\CrealityVisionAI\logs\ai_server.log`.
+* **HTTP Control Endpoints:** Exposes `GET /control/status`, `POST /control/start`, `POST /control/stop`, `POST /control/restart`, and `GET /control/logs`, seamlessly switching between `ai_upscaler_service.py` (Full GPU DirectML + Stringing AI) and `printer_telemetry.py` (CPU Telemetry + Stringing AI). Both `:8088` servers also expose `POST /server/stop` and enriched `GET /status` so even manually launched `.bat` instances can be stopped from Creality Print.
+* **Per-User Windows Auto-Start:** [`install_upscaler.ps1`](install_upscaler.ps1) registers `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\CrealityVisionAISupervisor` (no UAC elevation required) and starts the controller immediately.
+
+---
+
+## Dual-Engine Decoupled Architecture & Horizontal Dashboard UI
+
+### 1. Independent Decoupled Operation Matrix
+
+Creality Vision AI v1.1.0 introduces full runtime decoupling between the **Real-ESRGAN Neural Video Upscaler** and the **AI Stringing & Spaghetti Defect Watchdog**. Either engine can be toggled independently at any time without restarting the local backend or interrupting active print jobs:
+
+| State / Combination | Video Upscaler Toggle | Stringing Watchdog Toggle | Client Transmission Rate | GPU DirectML Inference | CPU Ridge Analysis | Display Surface Mode | Bounding Box & HUD Alerts |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Full Vision AI** | **ON** | **ON** | Camera V-Sync ($15\text{--}60\,\text{FPS}$) | Active ($1080\text{p}/1440\text{p}$) | Active (~$2.3\,\text{Hz}$) | Hardware Canvas 2D | Active (`#agyStringingCanvas`) |
+| **Upscale Only** | **ON** | **OFF** | Camera V-Sync ($15\text{--}60\,\text{FPS}$) | Active ($1080\text{p}/1440\text{p}$) | Disabled ($0\,\text{ms}$) | Hardware Canvas 2D | Hidden (Badge shows "Off") |
+| **Stringing Watchdog Only** | **OFF** | **ON** | Throttled ($2.5\,\text{FPS} \cdot 400\,\text{ms}$) | Bypassed ($0\,\text{MB}$ VRAM) | Active (~$2.3\,\text{Hz}$) | Native `<video>` ($100\%$ Opacity) | Active over Native Video |
+| **Zero Overhead Pass-Through**| **OFF** | **OFF** | Inactive ($0\,\text{FPS}$) | Bypassed ($0\,\text{MB}$ VRAM) | Disabled ($0\,\text{ms}$) | Native `<video>` ($100\%$ Opacity) | Hidden |
+
+#### Zero-Inference GPU Bypass Protocol
+When the video upscaler is turned off while stringing protection remains active:
+1. `upscale.js` dispatches `{ "upscale_enabled": false }` via WebSocket to `ai_upscaler_service.py`.
+2. The client frame capture loop throttles transmission interval from full camera framerate down to $400\,\text{ms}$ (~$2.5\,\text{FPS}$), reducing network IPC bandwidth by over $85\%$.
+3. Upon receiving binary packets, `ai_upscaler_service.py` detects `upscale_enabled == False` and immediately extracts decoded RGB arrays for the stringing queue via `_extract_rgb_for_stringing()` without invoking the DirectML ONNX execution provider.
+4. The client canvas overlay is hidden (`canvas.style.display = 'none'`) and the underlying camera element restores full opacity (`activeVideo.style.opacity = '1'`), granting latency-free native video while maintaining real-time defect monitoring and automated print pausing.
+
+### 2. Ergonomic Horizontal Dual-Column Dashboard Layout
+
+The v1.1.0 update reorganizes the in-app control panel (`#aiPanel` in [`upscale.js`](upscale.js)) from a tall vertical stack into a high-density, horizontal two-column grid engineered to fit within standard Creality Print desktop viewports:
+
+```
++---------------------------------------------------------------------------------------------------+
+|  Enhancement AI & Protezione                           [Upscaler Video] [X]                       |
+|  Server locale, monitoraggio cinematico e super-risoluzione                                       |
++-------------------------------------------------+-------------------------------------------------+
+|  COLUMN 1: CONTROLLO SERVER & STRINGING AI     |  COLUMN 2: PRESTAZIONI & QUALITA VIDEO          |
++-------------------------------------------------+-------------------------------------------------+
+|  SERVER AI (:8088)                              |  PRESTAZIONI VIDEO & FPS                        |
+|  [Stato Servizio: Attivo . GPU]                 |  Camera: 30.0 fps    AI Upscale: 30.0 fps       |
+|  Modalita | Processo | Attivo da | Capacita     |  GPU/tot: 11/17 ms   Display: 144.0 fps         |
+|  [Modalita di avvio: Auto (GPU/CPU)          v] |  Limite: Camera (30 fps in ingresso)            |
+|  [ Avvia ] [ Ferma ] [ Riavvia ] [ Log ]        |                                                 |
+|                                                 |  PARAMETRI IMMAGINE                             |
+|  RILEVAMENTO STRINGING (AI)                     |  HDR Ombre:  [=======|------] 25%               |
+|  [X] Protezione Stringing AI (Indipendente)    |  Nitidezza:  [====|---------] 35%               |
+|  [X] Pausa automatica stampa alla conferma      |  Intensita:  [==========|---] 85%               |
+|  [Sensibilita: Bilanciata (4.5s)             v] |  Contrasto & Luminosita                         |
+|  Stato | Rischio | Conferma | Analisi           |                                                 |
+|  [ Ricalibra scena ]                            |  QUALITA & FLUIDITA                             |
+|                                                 |  Input: 640x360      Output: 1080p FHD          |
+|                                                 |  [X] Smussamento dissolvenza tra frame          |
+|                                                 |  [Frequenza display: Auto                    v] |
+|                                                 |  [ Ripristina predefiniti ]                     |
++-------------------------------------------------+-------------------------------------------------+
+```
+
+* **Grid Geometry:** Powered by CSS Grid (`grid-template-columns: 1.02fr 0.98fr; gap: 16px;`) with a maximum width of $650\,\text{px}$ and viewport-bounded scrollable height (`max-height: calc(100vh - top - 16px)`).
+* **Responsive Breakpoint:** Under window widths $\le 680\,\text{px}$, a CSS media query seamlessly collapses the grid into a single column to prevent horizontal overflow.
+* **Independent Telemetry Badges:**
+  * Top-Right Badge (`#aiBadge`): Dedicated to Video Upscaler status (`AI · 30.0 fps`, `Upscaler disattivo`, or `Upscaler offline`).
+  * Top-Left Badge (`#agyStringingHost`): Dedicated to Stringing Watchdog status (`Stringing AI · Attiva`, `Sospetto stringing 65%`, `Stampa in pausa · Stringing 91%`, or `Stringing AI · Off`).
 
 ---
 
@@ -394,15 +472,17 @@ original input=input output=output opset=[14]
 saved .../models/realesr_animevideo_v3_fused.onnx
 ```
 
-### Step 3: Inject the CEF Hook into Creality Print
+### Step 3: Inject the CEF Hook & Local Supervisor (:8089)
 Run the PowerShell injection script:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install_upscaler.ps1
 ```
-The script will back up `index.html`, copy `upscale.js`, insert the `<script>` tag, and update NTFS DACL permissions.
+The script backs up `index.html`, copies `upscale.js`, inserts the `<script>` tag, configures NTFS DACL permissions, registers per-user HKCU auto-start for [`server_manager.py`](server_manager.py) on port `8089`, and launches the controller immediately.
 
-### Step 4: Start the Super-Resolution Engine
-Launch the service via the included batch script:
+### Step 4: Control the AI Server (:8088) from Creality Print or Batch
+Once Creality Print is open on the **Device** tab, you can inspect live status/logs and start, stop, or restart the `:8088` backend directly from the top-right AI panel (`Server AI (:8088)`) or via the quick inline button in the **Attività ugello** card.
+
+Optionally, you can also launch the service manually via the included batch script:
 ```powershell
 .\Avvia_AI_Upscaler.bat
 ```
@@ -424,8 +504,11 @@ Open Creality Print, connect to your 3D printer, and open the **Device** interfa
 ## File System Manifest
 
 ```
-├── ai_upscaler_service.py       # Asynchronous WebSocket/REST server & DirectML inference engine
-├── upscale.js                   # Injected CEF script (DOM observer, canvas overlay, HUD, speed hook)
+├── ai_upscaler_service.py       # Asynchronous WebSocket/REST server, DirectML engine & AI watchdog hook
+├── printer_telemetry.py         # Synchronized Moonraker + G-code Range telemetry & standalone HTTP server
+├── stringing_detector.py        # Multi-orientation ridge stringing/spaghetti detector & auto-pause engine
+├── server_manager.py            # Localhost supervisor (:8089) for in-app Start/Stop/Restart/Status/Logs
+├── upscale.js                   # Injected CEF script (DOM observer, canvas overlay, HUD, stringing boxes, server/speed/telemetry UI)
 ├── build_fused_model.py         # Topological ONNX graph surgery & operator fusion tool
 ├── install_upscaler.ps1         # Automated PowerShell CEF injector & NTFS DACL manager
 ├── Avvia_AI_Upscaler.bat        # Production launcher script

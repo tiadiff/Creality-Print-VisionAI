@@ -48,5 +48,48 @@ try {
     Write-Warning "Impossibile aggiornare i permessi ACL (non critico): $_"
 }
 
+# 5. Configura avvio automatico del controller locale (:8089) per Avvio/Arresto da Creality Print
+$repoRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$mgrScript = Join-Path $repoRoot "server_manager.py"
+if (Test-Path $mgrScript) {
+    $pyCmd = $null
+    $pywCmd = $null
+    $venvPy = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    $venvPyw = Join-Path $repoRoot ".venv\Scripts\pythonw.exe"
+    if (Test-Path $venvPyw) {
+        $pywCmd = $venvPyw
+        $pyCmd = if (Test-Path $venvPy) { $venvPy } else { $venvPyw }
+    } else {
+        $foundPy = Get-Command python -ErrorAction SilentlyContinue
+        $foundPyw = Get-Command pythonw -ErrorAction SilentlyContinue
+        if ($foundPyw) { $pywCmd = $foundPyw.Source }
+        if ($foundPy) { $pyCmd = $foundPy.Source }
+    }
+
+    if ($pywCmd) {
+        try {
+            $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+            $runVal = "`"$pywCmd`" `"$mgrScript`""
+            Set-ItemProperty -Path $runKey -Name "CrealityVisionAISupervisor" -Value $runVal -Type String
+            Write-Host "Avvio automatico controller locale configurato ($pywCmd)."
+        } catch {
+            Write-Warning "Impossibile registrare avvio automatico HKCU: $_"
+        }
+    }
+
+    if ($pyCmd) {
+        try {
+            & $pyCmd $mgrScript --ensure-running | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Controller locale (:8089) attivo in background."
+            } else {
+                Write-Warning "Controller locale (:8089) non ha risposto al check iniziale."
+            }
+        } catch {
+            Write-Warning "Avvio immediato controller locale non riuscito: $_"
+        }
+    }
+}
+
 Write-Host "`n=== INSTALLAZIONE COMPLETATA CON SUCCESSO! ==="
 
