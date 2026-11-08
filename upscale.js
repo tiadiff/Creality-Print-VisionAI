@@ -726,8 +726,15 @@
                     badge.className = "agy-str-badge calib";
                     txt.textContent = "Stringing AI · Calibrazione...";
                 } else if (state === "monitoring") {
+                    const isBackoff = Number(st.backoff_level || 0) > 0;
                     badge.className = "agy-str-badge ok";
-                    txt.textContent = conf >= 15 ? `Stringing AI · Attiva (${conf}%)` : "Stringing AI · Attiva";
+                    if (isBackoff) {
+                        txt.textContent = conf >= 15 ? `Stringing AI · Attiva (${conf}% · sens. ridotta)` : "Stringing AI · Attiva (sens. ridotta)";
+                        badge.title = `Ricalibrata: scena memorizzata, sensibilità ridotta (${st.effective_sensitivity || "ridotta"})`;
+                    } else {
+                        txt.textContent = conf >= 15 ? `Stringing AI · Attiva (${conf}%)` : "Stringing AI · Attiva";
+                        badge.title = "Clicca per impostazioni AI Stringing";
+                    }
                 } else if (state === "paused") {
                     badge.className = "agy-str-badge muted";
                     txt.textContent = "Stringing AI · Stampante in pausa";
@@ -1088,9 +1095,9 @@
                             </div>
                             <div class="ai-label">Sensibilit&agrave; rilevamento</div>
                             <select id="strSensSelect" class="ai-select" style="margin-bottom:8px">
-                                <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; 6s)</option>
-                                <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; 4.5s)</option>
-                                <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; 3s)</option>
+                                <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; 6.5s)</option>
+                                <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; 4.8s)</option>
+                                <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; 3.2s)</option>
                             </select>
                             <div class="ai-stats">
                                 <div class="ai-stat">Stato<b id="hudStrState">-</b></div>
@@ -1231,6 +1238,9 @@
             } else if (serverControlOnline && !srvRunning) {
                 badge.className = "offline";
                 badgeText.textContent = "Server AI \u00b7 Spento";
+            } else if (st && st.ai_mode === "standalone_cpu") {
+                badge.className = "offline";
+                badgeText.textContent = "Upscaler off (solo CPU)";
             } else {
                 badge.className = "offline";
                 badgeText.textContent = "Upscaler offline";

@@ -34,12 +34,19 @@ import numpy as np
 
 ANALYZE_WIDTH = 448
 
-# Preset sensitivity profiles: (threshold, confirm_seconds, min_strands_bonus)
+# Preset sensitivity profiles: (threshold, confirm_seconds)
+# Tuned specifically so textured PEI bed glare / minor shimmer never triggers
+# false positives while genuine growing stringing and spaghetti do.
 SENSITIVITY_PRESETS: Dict[str, Tuple[float, float]] = {
-    "low": (0.68, 6.0),       # Conservativa
-    "balanced": (0.55, 4.5),  # Bilanciata (default)
-    "high": (0.43, 3.0),      # Sensibile
+    "ultra_low": (0.82, 8.5),  # Post-recalibration step-down below Conservativa
+    "low": (0.74, 6.5),        # Conservativa
+    "balanced": (0.62, 4.8),   # Bilanciata (default)
+    "high": (0.50, 3.2),       # Sensibile
 }
+SENSITIVITY_ORDER = ("high", "balanced", "low", "ultra_low")
+_BASE_ENV_KERNEL = np.ones((5, 5), dtype=np.uint8)
+_BACKOFF_ENV_KERNEL = np.ones((7, 7), dtype=np.uint8)
+_CAND_DILATE_KERNEL = np.ones((11, 11), dtype=np.uint8)
 
 
 def _build_oriented_kernels(length: int = 5, n_angles: int = 6) -> Tuple[List[np.ndarray], List[Tuple[float, float]]]:
@@ -99,23 +106,36 @@ class StringingConfig:
     cooldown_seconds: float = 30.0
     calibration_frames: int = 8
 
-    def resolved_threshold(self) -> float:
-        if self.custom_threshold is not None:
-            return max(0.25, min(0.90, float(self.custom_threshold)))
-        return SENSITIVITY_PRESETS.get(self.sensitivity, SENSITIVITY_PRESETS["balanced"])[0]
+    def effective_sensitivity(self, backoff_level: int = 0) -> str:
+        base = self.sensitivity if self.sensitivity in SENSITIVITY_PRESETS else "balanced"
+        try:
+            idx = SENSITIVITY_ORDER.index(base)
+        except ValueError:
+            idx = 1
+        stepped = min(len(SENSITIVITY_ORDER) - 1, idx + max(0, int(backoff_level)))
+        return SENSITIVITY_ORDER[stepped]
 
-    def resolved_confirm_seconds(self) -> float:
+    def resolved_threshold(self, backoff_level: int = 0) -> float:
+        if self.custom_threshold is not None:
+            bump = 0.08 * max(0, int(backoff_level))
+            return max(0.30, min(0.92, float(self.custom_threshold) + bump))
+        eff = self.effective_sensitivity(backoff_level)
+        return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["balanced"])[0]
+
+    def resolved_confirm_seconds(self, backoff_level: int = 0) -> float:
         if self.confirm_seconds is not None:
-            return max(1.5, min(15.0, float(self.confirm_seconds)))
-        return SENSITIVITY_PRESETS.get(self.sensitivity, SENSITIVITY_PRESETS["balanced"])[1]
+            bump = 1.5 * max(0, int(backoff_level))
+            return max(1.5, min(15.0, float(self.confirm_seconds) + bump))
+        eff = self.effective_sensitivity(backoff_level)
+        return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["balanced"])[1]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "enabled": self.enabled,
             "auto_pause": self.auto_pause,
             "sensitivity": self.sensitivity,
-            "threshold": round(self.resolved_threshold(), 2),
-            "confirm_seconds": round(self.resolved_confirm_seconds(), 1),
+            "threshold": round(self.resolved_threshold(0), 2),
+            "confirm_seconds": round(self.resolved_confirm_seconds(0), 1),
             "cooldown_seconds": round(self.cooldown_seconds, 1),
         }
 
@@ -140,6 +160,9 @@ class _IpSession:
     prev_gray: Optional[np.ndarray] = None
     prev_mean_luma: Optional[float] = None
     bg_ridge: Optional[np.ndarray] = None
+    bg_envelope: Optional[np.ndarray] = None
+    bg_macro_lab: Optional[np.ndarray] = None
+    backoff_level: int = 0
     calibration_left: int = 8
     exposure_skip_left: int = 0
     roi_mask_shape: Optional[Tuple[int, int]] = None
@@ -164,12 +187,12 @@ class _IpSession:
 
 def _compute_roi_mask(h: int, w: int) -> np.ndarray:
     """
-    Exclude outer enclosure edges where gantries/belts move and corner regions
-    occupied by Creality Print native UI overlays (#aiBadge, .videoStatus, etc.).
+    Exclude outer enclosure edges where gantries/belts/bed metallic bezel sit
+    and corner regions occupied by Creality Print native UI overlays (#aiBadge, .videoStatus).
     """
     mask = np.ones((h, w), dtype=np.float32)
     top = max(8, int(round(h * 0.08)))
-    bot = max(6, int(round(h * 0.06)))
+    bot = max(8, int(round(h * 0.08)))
     side = max(8, int(round(w * 0.04)))
     mask[:top, :] = 0.0
     mask[h - bot :, :] = 0.0
@@ -416,37 +439,69 @@ class StringingWatchdog:
         with self._cfg_lock:
             if "enabled" in data:
                 self.config.enabled = bool(data["enabled"])
+                if not self.config.enabled:
+                    with self._sessions_lock:
+                        for s in self._sessions.values():
+                            with s.lock:
+                                s.ai_state = "disabled"
+                                s.streak_sec = 0.0
+                                s.ema_score = 0.0
+                                s.last_regions = []
             if "auto_pause" in data:
                 self.config.auto_pause = bool(data["auto_pause"])
             if "sensitivity" in data and str(data["sensitivity"]) in SENSITIVITY_PRESETS:
-                self.config.sensitivity = str(data["sensitivity"])
+                new_sens = str(data["sensitivity"])
+                sens_changed = new_sens != self.config.sensitivity
+                self.config.sensitivity = new_sens
                 self.config.custom_threshold = None
                 self.config.confirm_seconds = None
+                if sens_changed:
+                    with self._sessions_lock:
+                        for s in self._sessions.values():
+                            s.backoff_level = 0
             if "threshold" in data and data["threshold"] is not None:
-                self.config.custom_threshold = max(0.25, min(0.90, float(data["threshold"])))
+                self.config.custom_threshold = max(0.25, min(0.92, float(data["threshold"])))
             if "confirm_seconds" in data and data["confirm_seconds"] is not None:
                 self.config.confirm_seconds = max(1.5, min(15.0, float(data["confirm_seconds"])))
             if "cooldown_seconds" in data and data["cooldown_seconds"] is not None:
                 self.config.cooldown_seconds = max(5.0, min(180.0, float(data["cooldown_seconds"])))
             return self.config.to_dict()
 
-    def reset_baseline(self, ip: Optional[str] = None, clear_alert: bool = True) -> Dict[str, Any]:
+    def reset_baseline(self, ip: Optional[str] = None, clear_alert: bool = True, step_down: bool = True, now: Optional[float] = None) -> Dict[str, Any]:
         sess = self._get_session(ip)
+        cur_time = time.time() if now is None else float(now)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
         with sess.lock:
+            cur_thr = cfg.resolved_threshold(sess.backoff_level)
+            had_detection = (
+                sess.paused_by_ai
+                or (sess.alert_info is not None)
+                or (sess.ai_state in ("warning", "paused_by_ai", "alert_only"))
+                or (sess.streak_sec > 0.25)
+                or (sess.ema_score >= cur_thr * 0.55)
+                or (sess.last_raw_score >= cur_thr * 0.55)
+                or bool(sess.last_regions)
+            )
+            if step_down and had_detection:
+                sess.backoff_level = min(2, sess.backoff_level + 1)
+
             sess.bg_ridge = None
+            sess.bg_envelope = None
+            sess.bg_macro_lab = None
             sess.prev_gray = None
-            sess.calibration_left = self.config.calibration_frames
+            sess.calibration_left = max(6, cfg.calibration_frames)
             sess.ema_score = 0.0
             sess.last_raw_score = 0.0
             sess.streak_sec = 0.0
             sess.last_regions = []
             sess.paused_by_ai = False
-            sess.cooldown_until = time.time() + 4.0
+            sess.cooldown_until = cur_time + 6.0
             sess.ai_state = "calibrating"
             if clear_alert:
                 sess.alert_info = None
                 sess.alert_snapshot_jpeg = None
-            return self._build_status_locked(sess, self.config)
+            return self._build_status_locked(sess, cfg, cur_time=cur_time)
 
     def get_status(self, ip: Optional[str] = None) -> Dict[str, Any]:
         sess = self._get_session(ip)
@@ -494,6 +549,7 @@ class StringingWatchdog:
         rgb: np.ndarray,
         ctx: Optional[PrinterContext],
         now: float,
+        eff_thr: float = 0.64,
     ) -> Tuple[float, List[Dict[str, Any]], float, int, int]:
         """
         Core CV evaluation on normalized image.
@@ -512,11 +568,14 @@ class StringingWatchdog:
             sess.roi_mask_shape = (sh, sw)
 
         filament_map, best_orient, sobel_mag, l_chan = _compute_symmetrical_filament_map(rgb_small)
+        macro_blur = cv2.GaussianBlur(rgb_small, (11, 11), 3.5).astype(np.float32)
         mean_luma = float(l_chan.mean())
 
         # Detect abrupt LED switch / exposure jump
         if sess.prev_mean_luma is not None and abs(mean_luma - sess.prev_mean_luma) > 16.0:
             sess.bg_ridge = None
+            sess.bg_envelope = None
+            sess.bg_macro_lab = None
             sess.prev_gray = l_chan
             sess.prev_mean_luma = mean_luma
             sess.calibration_left = max(sess.calibration_left, 8)
@@ -538,22 +597,44 @@ class StringingWatchdog:
             sess.exposure_skip_left -= 1
             return 0.0, [], mean_luma, 0, 0
 
-        # Baseline scene maintenance (frozen during potential stringing)
+        # Baseline scene initialization & calibration window
         if sess.bg_ridge is None or sess.bg_ridge.shape != masked_map.shape:
             sess.bg_ridge = masked_map.copy()
+            sess.bg_envelope = masked_map.copy()
+            sess.bg_macro_lab = macro_blur.copy()
             sess.calibration_left = max(1, sess.calibration_left - 1)
             return 0.0, [], mean_luma, 0, 0
 
         if sess.calibration_left > 0:
-            sess.bg_ridge = cv2.addWeighted(sess.bg_ridge, 0.72, masked_map, 0.28, 0.0)
+            sess.bg_ridge = np.where(valid, cv2.addWeighted(sess.bg_ridge, 0.65, masked_map, 0.35, 0.0), sess.bg_ridge)
+            if sess.bg_envelope is None or sess.bg_envelope.shape != masked_map.shape:
+                sess.bg_envelope = masked_map.copy()
+            else:
+                sess.bg_envelope = np.where(valid, np.maximum(sess.bg_envelope, masked_map), sess.bg_envelope)
+            if sess.bg_macro_lab is None or sess.bg_macro_lab.shape != macro_blur.shape:
+                sess.bg_macro_lab = macro_blur.copy()
+            else:
+                v3 = valid[:, :, None]
+                sess.bg_macro_lab = np.where(v3, 0.65 * sess.bg_macro_lab + 0.35 * macro_blur, sess.bg_macro_lab)
             sess.calibration_left -= 1
             return 0.0, [], mean_luma, 0, 0
 
-        novel_ridge = np.maximum(0.0, masked_map - np.maximum(4.5, 0.90 * sess.bg_ridge + 3.0))
+        # Spatially tolerant baseline subtraction: absorb +-2px bed Z-drop, shimmer,
+        # and previously accepted post-recalibration strands without muting new growth.
+        backoff = max(0, int(sess.backoff_level))
+        bg_ref = (
+            0.50 * sess.bg_ridge + 0.50 * sess.bg_envelope
+            if sess.bg_envelope is not None
+            else sess.bg_ridge
+        )
+        bg_env = cv2.dilate(bg_ref, _BASE_ENV_KERNEL)
+        margin_mult = 1.04 + 0.02 * min(2, backoff)
+        margin_add = 4.2 + 0.8 * min(2, backoff)
+        novel_ridge = np.maximum(0.0, masked_map - np.maximum(5.5, margin_mult * bg_env + margin_add))
 
         valid_vals = novel_ridge[valid]
         noise_p75 = float(np.percentile(valid_vals, 75)) if valid_vals.size > 0 else 0.0
-        thr = max(10.0, 2.75 * noise_p75)
+        thr = max(12.5 + 0.8 * min(2, backoff), (3.0 + 0.12 * min(2, backoff)) * noise_p75)
 
         cand = ((novel_ridge > thr) & valid).astype(np.uint8)
 
@@ -562,7 +643,9 @@ class StringingWatchdog:
         if solid_core.any():
             cand = cand & (~cv2.dilate(solid_core, _THIN_DILATE_KERNEL))
 
-        # Keep only thin, non-speckle components and cache kept metadata once globally
+        # Keep only coherent elongated strands; filter out short PEI glitter speckles
+        min_area = 12
+        min_diag = 11.5
         n_cc, cc_labels, cc_stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
         thin_mask = np.zeros((sh, sw), dtype=np.uint8)
         kept_ids: List[int] = []
@@ -572,7 +655,7 @@ class StringingWatchdog:
             bw = int(cc_stats[cid, cv2.CC_STAT_WIDTH])
             bh = int(cc_stats[cid, cv2.CC_STAT_HEIGHT])
             diag = math.hypot(bw, bh)
-            if area < 8 or diag < 9.0:
+            if area < min_area or diag < min_diag:
                 continue
             # Reject wide blocky chunks with high fill solidity
             if area > 1200 and (area / float(max(1, bw * bh))) > 0.45:
@@ -581,11 +664,21 @@ class StringingWatchdog:
             kept_ids.append(cid)
             comp_diag[cid] = diag
 
+        if sess.bg_macro_lab is not None and sess.bg_macro_lab.shape == macro_blur.shape:
+            macro_diff_map = np.mean(np.abs(macro_blur - sess.bg_macro_lab), axis=2)
+        else:
+            macro_diff_map = np.zeros((sh, sw), dtype=np.float32)
+
         if not kept_ids:
-            sess.bg_ridge = cv2.addWeighted(sess.bg_ridge, 0.985, masked_map, 0.015, 0.0)
+            sess.bg_ridge = np.where(valid, cv2.addWeighted(sess.bg_ridge, 0.985, masked_map, 0.015, 0.0), sess.bg_ridge)
+            if sess.bg_envelope is not None and backoff == 0:
+                sess.bg_envelope = np.where(valid, cv2.addWeighted(sess.bg_envelope, 0.992, masked_map, 0.008, 0.0), sess.bg_envelope)
+            if sess.bg_macro_lab is not None and backoff == 0:
+                v3 = valid[:, :, None]
+                sess.bg_macro_lab = np.where(v3, 0.985 * sess.bg_macro_lab + 0.015 * macro_blur, sess.bg_macro_lab)
             return 0.0, [], mean_luma, 0, 0
 
-        # Spatial sliding tiles (approx 84x64 with 42x32 stride on 480x270)
+        # Spatial sliding tiles (approx 84x64 with 42x32 stride)
         tile_w = max(60, int(round(sw * 0.175)))
         tile_h = max(48, int(round(sh * 0.24)))
         step_x = max(30, tile_w // 2)
@@ -595,15 +688,11 @@ class StringingWatchdog:
         tile_scores: List[float] = []
         raw_boxes: List[Dict[str, Any]] = []
         detected_cid_set = set()
+        box_min_score = max(0.45, eff_thr * 0.72)
 
-        # Precompute slight infill guard if currently printing internal sparse infill
         infill_penalty = 0.0
         if ctx and ctx.feature_category == "infill" and ctx.is_extruding:
-            infill_penalty = 0.07
-
-        kept_lut = np.zeros(n_cc, dtype=bool)
-        for cid in kept_ids:
-            kept_lut[cid] = True
+            infill_penalty = 0.08
 
         for y0 in range(0, sh - tile_h + 1, step_y):
             y1 = y0 + tile_h
@@ -615,22 +704,24 @@ class StringingWatchdog:
 
                 t_thin = thin_mask[y0:y1, x0:x1]
                 active_px = int(t_thin.sum())
-                if active_px < 15:
+                if active_px < 18:
                     continue
 
                 t_novel = novel_ridge[y0:y1, x0:x1]
+                t_raw_fmap = masked_map[y0:y1, x0:x1]
                 t_sobel = sobel_mag[y0:y1, x0:x1]
                 t_orient = best_orient[y0:y1, x0:x1]
                 t_cc = cc_labels[y0:y1, x0:x1]
+                t_mdiff = macro_diff_map[y0:y1, x0:x1]
 
-                # Count distinct global filament strands touching this tile
                 present_cids = np.unique(t_cc[t_thin > 0])
                 strand_count = int(len(present_cids))
-                span_sum = sum(comp_diag.get(int(cid), 10.0) for cid in present_cids)
                 if strand_count == 0:
                     continue
+                diags = [comp_diag.get(int(cid), 12.0) for cid in present_cids]
+                span_sum = sum(diags)
+                max_diag = max(diags)
 
-                # Sub-quadrant spread (single stray wire hits 1-2 quadrants; webs hit 2-4)
                 qh, qw = tile_h // 2, tile_w // 2
                 quads_hit = sum(
                     1
@@ -640,33 +731,29 @@ class StringingWatchdog:
                         t_thin[qh:, :qw],
                         t_thin[qh:, qw:],
                     )
-                    if int(qa.sum()) >= 4
+                    if int(qa.sum()) >= 5
                 )
 
-                # Orientation entropy across angular bins (normalized 0..1)
                 orient_vals = t_orient[t_thin > 0]
                 bins = np.bincount(orient_vals, minlength=_N_ANGLES).astype(np.float32)
                 probs = bins / float(max(1, bins.sum()))
                 nz = probs[probs > 0]
                 entropy = float(-(nz * np.log(nz)).sum() / math.log(float(_N_ANGLES))) if nz.size > 0 else 0.0
 
-                # Local ridge-to-Sobel purity measured directly on/around detected filaments
-                # so nearby solid cube walls do not dilute genuine inter-tower strings
                 t_ring = cv2.dilate(t_thin, _EDGE_RING_KERNEL) > 0
                 mean_ridge_on_strand = float(t_novel[t_thin > 0].mean())
+                p85_ridge_on_strand = float(np.percentile(t_novel[t_thin > 0], 85))
                 mean_sobel_on_strand = float(t_sobel[t_ring].mean()) + 1e-3
                 edge_purity = min(1.0, (mean_ridge_on_strand / (mean_sobel_on_strand * 1.15 + 4.0)))
 
-                # Gentle flutter correlation (hanging hairs vibrate in part cooling fan air)
                 flut_frac = float(flutter_mask[y0:y1, x0:x1][t_thin > 0].mean())
-                flutter_bonus = min(0.10, flut_frac * 0.22)
+                flutter_bonus = min(0.08, flut_frac * 0.20)
 
-                # Core physical terms
-                length_term = 1.0 - math.exp(-span_sum / 85.0)
-                strand_term = min(1.0, (strand_count - 0.2) / 3.8)
+                length_term = 1.0 - math.exp(-span_sum / 92.0)
+                strand_term = min(1.0, (strand_count - 0.2) / 4.2)
                 quad_term = quads_hit / 4.0
-                strength_term = min(1.0, max(0.0, (mean_ridge_on_strand - 10.0) / 32.0))
-                pattern_term = max(entropy, 0.90 * min(1.0, strand_count / 3.0) * quad_term)
+                strength_term = min(1.0, max(0.0, (mean_ridge_on_strand - 11.0) / 34.0))
+                pattern_term = max(entropy, 0.90 * min(1.0, strand_count / 3.2) * quad_term)
 
                 score = (
                     0.30 * length_term
@@ -678,8 +765,21 @@ class StringingWatchdog:
                     - infill_penalty
                 )
 
+                # Textured PEI plate / granular surface suppression:
+                # Bare PEI sheets have high background carpet ridge (med >= 7.0) with sparse
+                # contrast peaks and almost zero macro appearance change vs baseline.
+                tile_fmap_med = float(np.median(t_raw_fmap))
+                tile_fmap_p75 = float(np.percentile(t_raw_fmap, 75))
+                if tile_fmap_med >= 7.0:
+                    peak_over_carpet = p85_ridge_on_strand / (tile_fmap_p75 + 4.0)
+                    macro_delta_strand = float(t_mdiff[t_thin > 0].mean())
+                    if macro_delta_strand < 9.0 and (peak_over_carpet < 1.35 or max_diag < 26.0):
+                        score *= 0.28
+                    elif tile_fmap_med >= 10.5 and macro_delta_strand < 12.0 and peak_over_carpet < 1.6:
+                        score *= 0.42
+
                 # Gate out isolated weak lines or pure high-gradient solid textures
-                if edge_purity < 0.25 or (strand_count < 2 and span_sum < 36.0):
+                if edge_purity < 0.26 or (strand_count < 2 and span_sum < 40.0):
                     score *= 0.45
                 if quads_hit < 2 and strand_count < 2:
                     score *= 0.65
@@ -687,7 +787,7 @@ class StringingWatchdog:
                 score = max(0.0, min(1.0, score))
                 tile_scores.append(score)
 
-                if score >= 0.36:
+                if score >= box_min_score:
                     for cid in present_cids:
                         detected_cid_set.add(int(cid))
                     raw_boxes.append(
@@ -709,28 +809,39 @@ class StringingWatchdog:
             top1 = tile_scores[0]
             top_k = tile_scores[:3]
             cluster_mean = sum(top_k) / float(len(top_k))
-            multi_tile_bonus = 0.06 if len([s for s in tile_scores if s >= 0.42]) >= 2 else 0.0
+            multi_tile_bonus = 0.05 if len([s for s in tile_scores if s >= max(0.45, box_min_score)]) >= 2 else 0.0
             frame_score = min(1.0, 0.62 * top1 + 0.38 * cluster_mean + multi_tile_bonus)
         else:
             frame_score = 0.0
 
-        # Freeze baseline update whenever frame looks potentially abnormal so developing
-        # cobwebs never dissolve into background
-        if frame_score < 0.18:
-            sess.bg_ridge = cv2.addWeighted(sess.bg_ridge, 0.985, masked_map, 0.015, 0.0)
+        # Region-selective background adaptation: even if another area has mild strings,
+        # clean empty bed tiles outside detected clusters gently adapt to Z-shift & shimmer.
+        if frame_score < eff_thr * 0.60:
+            non_anom = valid & (cv2.dilate(thin_mask, _CAND_DILATE_KERNEL) == 0)
+            if non_anom.any():
+                sess.bg_ridge = np.where(non_anom, cv2.addWeighted(sess.bg_ridge, 0.985, masked_map, 0.015, 0.0), sess.bg_ridge)
+                if sess.bg_envelope is not None and backoff == 0:
+                    sess.bg_envelope = np.where(non_anom, cv2.addWeighted(sess.bg_envelope, 0.992, masked_map, 0.008, 0.0), sess.bg_envelope)
+                if sess.bg_macro_lab is not None and backoff == 0:
+                    na3 = non_anom[:, :, None]
+                    sess.bg_macro_lab = np.where(na3, 0.985 * sess.bg_macro_lab + 0.015 * macro_blur, sess.bg_macro_lab)
 
         return frame_score, regions, mean_luma, total_strands, len(raw_boxes)
 
-    def _build_status_locked(self, sess: _IpSession, cfg: StringingConfig) -> Dict[str, Any]:
-        confirm_s = cfg.resolved_confirm_seconds()
+    def _build_status_locked(self, sess: _IpSession, cfg: StringingConfig, cur_time: Optional[float] = None) -> Dict[str, Any]:
+        confirm_s = cfg.resolved_confirm_seconds(sess.backoff_level)
+        eff_sens = cfg.effective_sensitivity(sess.backoff_level)
         confirm_pct = min(1.0, max(0.0, sess.streak_sec / confirm_s)) if confirm_s > 0 else 0.0
+        now_sec = time.time() if cur_time is None else float(cur_time)
         return {
             "ok": True,
             "ip": sess.ip,
             "enabled": cfg.enabled,
             "auto_pause": cfg.auto_pause,
             "sensitivity": cfg.sensitivity,
-            "threshold": round(cfg.resolved_threshold(), 2),
+            "effective_sensitivity": eff_sens,
+            "backoff_level": int(sess.backoff_level),
+            "threshold": round(cfg.resolved_threshold(sess.backoff_level), 2),
             "confirm_seconds": round(confirm_s, 1),
             "ai_state": sess.ai_state,
             "score": round(sess.last_raw_score, 3),
@@ -743,7 +854,7 @@ class StringingWatchdog:
             "avg_infer_ms": round(sess.avg_infer_ms, 1),
             "calibration_left": sess.calibration_left,
             "paused_by_ai": sess.paused_by_ai,
-            "cooldown_remaining_s": round(max(0.0, sess.cooldown_until - time.time()), 1),
+            "cooldown_remaining_s": round(max(0.0, sess.cooldown_until - now_sec), 1),
             "alert": sess.alert_info,
             "has_snapshot": sess.alert_snapshot_jpeg is not None or sess.latest_annotated_jpeg is not None,
             "printer_state": sess.last_printer_state or "unknown",
@@ -775,7 +886,7 @@ class StringingWatchdog:
                 sess.streak_sec = 0.0
                 sess.ema_score = 0.0
                 sess.last_regions = []
-                res = self._build_status_locked(sess, cfg)
+                res = self._build_status_locked(sess, cfg, cur_time=cur_time)
                 res["auto_pause_triggered"] = False
                 res["should_pause_ui"] = False
                 return res
@@ -787,20 +898,30 @@ class StringingWatchdog:
             sess.last_eval_ts = cur_time
 
             printer_state = (ctx.state.lower() if ctx else ("printing" if assume_printing_if_no_ctx else "unknown"))
-            # Detect transition back from paused -> printing: reset baseline so old
-            # residual markings do not re-pause immediately after user resume.
+            # Detect transition into printing:
+            # - From paused: preserve/step-down sensitivity if resuming from AI detection & relock baseline
+            # - From standby/idle/complete: fresh job starts cleanly at full configured sensitivity
             if sess.last_printer_state in ("paused", "standby", "idle", "complete") and printer_state == "printing":
+                if sess.last_printer_state in ("standby", "idle", "complete"):
+                    sess.backoff_level = 0
+                elif sess.paused_by_ai or sess.alert_info is not None or sess.streak_sec > 0.2:
+                    sess.backoff_level = min(2, sess.backoff_level + 1)
                 sess.bg_ridge = None
-                sess.calibration_left = cfg.calibration_frames
+                sess.bg_envelope = None
+                sess.bg_macro_lab = None
+                sess.calibration_left = max(6, cfg.calibration_frames)
                 sess.streak_sec = 0.0
                 sess.ema_score = 0.0
                 sess.paused_by_ai = False
                 sess.cooldown_until = max(sess.cooldown_until, cur_time + cfg.cooldown_seconds * 0.5)
             sess.last_printer_state = printer_state
 
+            eff_thr = cfg.resolved_threshold(sess.backoff_level)
+            eff_confirm = cfg.resolved_confirm_seconds(sess.backoff_level)
+
             # Compute CV vision score
             frame_score, regions, mean_luma, total_strands, anomaly_tiles = self._score_frame_cv(
-                sess, frame_rgb, ctx, cur_time
+                sess, frame_rgb, ctx, cur_time, eff_thr=eff_thr
             )
             infer_ms = (time.perf_counter() - t0) * 1000.0
             sess.frames_analyzed += 1
@@ -836,25 +957,23 @@ class StringingWatchdog:
                 sess.ema_score = 0.0
             else:
                 sess.ema_score = 0.42 * frame_score + 0.58 * sess.ema_score
-                thr = cfg.resolved_threshold()
-                confirm_s = cfg.resolved_confirm_seconds()
 
-                if sess.ema_score >= thr or (frame_score >= thr and sess.ema_score >= thr * 0.85):
+                if sess.ema_score >= eff_thr or (frame_score >= eff_thr and sess.ema_score >= eff_thr * 0.85):
                     sess.streak_sec += dt
                     sess.ai_state = "warning"
-                elif frame_score >= thr * 0.75:
+                elif frame_score >= eff_thr * 0.78:
                     sess.streak_sec = max(0.0, sess.streak_sec - dt * 0.35)
                     sess.ai_state = "warning" if sess.streak_sec > 0.4 else "monitoring"
                 else:
                     sess.streak_sec = max(0.0, sess.streak_sec - dt * 1.5)
                     sess.ai_state = "monitoring"
 
-                if regions and frame_score >= 0.42:
+                if regions and frame_score >= max(0.46, eff_thr * 0.75):
                     sess.latest_annotated_jpeg = _render_evidence_jpeg(
                         frame_rgb, regions, max(frame_score, sess.ema_score), "Rilevamento Stringing"
                     )
 
-                if sess.streak_sec >= confirm_s:
+                if sess.streak_sec >= eff_confirm:
                     # Sustained stringing confirmed!
                     snap = _render_evidence_jpeg(
                         frame_rgb, regions, max(frame_score, sess.ema_score), "AUTO-PAUSA STRINGING"
@@ -903,7 +1022,7 @@ class StringingWatchdog:
                     else:
                         sess.ai_state = "alert_only"
 
-            res = self._build_status_locked(sess, cfg)
+            res = self._build_status_locked(sess, cfg, cur_time=cur_time)
             res["frame_score"] = round(frame_score, 3)
             res["mean_luma"] = round(mean_luma, 1)
             res["strands_detected"] = total_strands
