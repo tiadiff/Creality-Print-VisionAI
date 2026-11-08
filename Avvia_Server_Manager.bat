@@ -17,3 +17,4 @@ if %errorlevel% neq 0 (
     echo Supervisore terminato con codice %errorlevel%.
     pause
 )
+

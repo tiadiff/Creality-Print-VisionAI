@@ -518,6 +518,11 @@ powershell -ExecutionPolicy Bypass -File .\install_upscaler.ps1
 ```
 The script backs up `index.html`, copies `upscale.js`, inserts the `<script>` tag, configures NTFS DACL permissions, registers per-user HKCU auto-start for [`server_manager.py`](server_manager.py) on port `8089`, and launches the controller immediately.
 
+To completely revert and uninstall the injection, run:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall_upscaler.ps1
+```
+
 ### Step 4: Control the AI Server (:8088) from Creality Print or Batch
 Once Creality Print is open on the **Device** tab, you can inspect live status/logs and start, stop, or restart the `:8088` backend directly from the top-right AI panel (`Server AI (:8088)`) or via the quick inline button in the **Attività ugello** card.
 
@@ -556,6 +561,7 @@ Open Creality Print, connect to your 3D printer, and open the **Device** interfa
 │   └── SparkXPrintConsole/      # C# .NET 8 desktop application sources
 ├── build_fused_model.py         # Topological ONNX graph surgery & operator fusion tool
 ├── install_upscaler.ps1         # Automated PowerShell CEF injector & NTFS DACL manager
+├── uninstall_upscaler.ps1       # Clean 1-click uninstaller restoring original index.html
 ├── Avvia_AI_Upscaler.bat        # Production launcher script
 ├── requirements.txt             # Python dependencies (onnxruntime-directml, aiohttp, etc.)
 ├── screen.png                   # High-DPI capture of the injected UI HUD and control panel

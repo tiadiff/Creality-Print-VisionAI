@@ -202,6 +202,7 @@
                 pushStringingConfigToService();
                 ws.send(JSON.stringify({ action: "get_speed", ip: activePrinterIp || undefined }));
                 ws.send(JSON.stringify({ action: "get_stringing", ip: activePrinterIp || undefined }));
+                ensureRenderLoop();
                 updateBadge();
             };
 
@@ -259,10 +260,11 @@
             ws.onclose = () => {
                 wsConnected = false;
                 inFlight = 0;
+                ensureRenderLoop();
                 updateBadge();
                 setTimeout(connectAIWebSocket, 3000);
             };
-            ws.onerror = () => { wsConnected = false; inFlight = 0; updateBadge(); };
+            ws.onerror = () => { wsConnected = false; inFlight = 0; ensureRenderLoop(); updateBadge(); };
         } catch (e) {
             wsConnected = false;
         }
@@ -323,8 +325,27 @@
         return true;
     }
 
+    function ensureRenderLoop() {
+        if (settings.enabled && wsConnected && activeVideo) {
+            if (!animId) animId = requestAnimationFrame(renderLoop);
+        } else {
+            if (animId) {
+                cancelAnimationFrame(animId);
+                animId = null;
+            }
+            if (activeVideo) activeVideo.style.opacity = "1";
+            if (canvas) canvas.style.display = "none";
+        }
+    }
+
     // ---------------------------------------------------------------- Render loop
     function renderLoop(renderTimestamp) {
+        if (!(settings.enabled && wsConnected)) {
+            animId = null;
+            if (activeVideo) activeVideo.style.opacity = "1";
+            if (canvas) canvas.style.display = "none";
+            return;
+        }
         animId = requestAnimationFrame(renderLoop);
         const now = renderTimestamp || performance.now();
 
@@ -343,13 +364,6 @@
             if (raw >= 50 && raw <= 360) detectedMonitorHz = Math.round(raw);
             updateHud();
             updateBadge();
-        }
-
-        if (!(settings.enabled && wsConnected)) {
-            if (activeVideo) activeVideo.style.opacity = "1";
-            if (canvas) canvas.style.display = "none";
-            if (!rvfcActive && settings.stringingEnabled) sendFrameToAI();
-            return;
         }
 
         if (!rvfcActive) sendFrameToAI(); // browsers without requestVideoFrameCallback
@@ -1219,7 +1233,7 @@
         if (!activeVideo || activeVideo.paused || activeVideo.readyState < 2 || activeVideo.videoWidth === 0) return;
 
         const now = performance.now();
-        if ((now - lastStringingPostAt) < 440) return;
+        if ((now - lastStringingPostAt) < 1500) return;
         lastStringingPostAt = now;
 
         const w = 480;
@@ -1297,8 +1311,7 @@
         connectAIWebSocket();
         startVideoFrameLoop(videoEl);
 
-        if (animId) cancelAnimationFrame(animId);
-        animId = requestAnimationFrame(renderLoop);
+        ensureRenderLoop();
         drawStringingOverlay();
 
         if (!videoEl.__agyResizeObserved && typeof ResizeObserver !== "undefined") {
@@ -1880,6 +1893,7 @@
                 if (canvas) canvas.style.display = "none";
                 if (activeVideo) activeVideo.style.opacity = "1";
             }
+            ensureRenderLoop();
             updateBadge();
             updateHud();
         });
@@ -2104,6 +2118,14 @@
 
     function openPrinterSocket(addr) {
         if (!addr) return null;
+        if (serviceTelemetryOk || (!settings.enabled && !settings.stringingEnabled)) {
+            if (printerWs) {
+                try { printerWs.close(); } catch (e) {}
+                printerWs = null;
+                ws9999State.connected = false;
+            }
+            return null;
+        }
         if (printerWs && printerWs.__addr === addr && printerWs.readyState <= 1) return printerWs;
         try {
             if (printerWs && printerWs.__addr !== addr) {
@@ -2797,10 +2819,10 @@
     }
 
     function injectSleepModeServerManagerButton() {
-        // Look for the Sleep Mode container in the native UI
-        const allSpans = document.querySelectorAll("span, div");
+        if (document.querySelector(".agy-srvmgr-btn")) return;
+        const candidates = document.querySelectorAll(".device-detail span, .print-model span, .header-left span, .device-item span");
         let sleepNode = null;
-        for (const el of allSpans) {
+        for (const el of candidates) {
             const t = (el.textContent || "").trim();
             if (t === "Modalità sleep" || t === "Sleep mode") {
                 sleepNode = el;
@@ -3268,11 +3290,13 @@
         if (document.visibilityState !== "hidden") {
             pollServerControlStatus(false);
         }
-    }, 350);
+    }, 1200);
 
     setInterval(() => {
-        pollStandaloneStringingFrame();
-    }, 250);
+        if (settings.stringingEnabled) {
+            pollStandaloneStringingFrame();
+        }
+    }, 1200);
 
     setInterval(() => {
         if (sliderEl && document.body.contains(sliderEl) && !speedDragging && !isPointerDownOnSpeed && !serviceTelemetryOk) {
@@ -3304,12 +3328,35 @@
     }
 
     let scanScheduled = false;
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((mutations) => {
+        const hasSlider = Boolean(document.querySelector(".agy-speed-fine"));
+        const hasCard = Boolean(document.querySelector(".agy-telemetry-card"));
+        const hasBtn = Boolean(document.querySelector(".agy-srvmgr-btn"));
+        if (hasSlider && hasCard && hasBtn && activeVideo) return;
+
+        for (const m of mutations) {
+            if (m.target && m.target.classList && (
+                m.target.classList.contains("agy-speed-fine") ||
+                m.target.classList.contains("agy-telemetry-card") ||
+                m.target.classList.contains("agy-panel") ||
+                m.target.classList.contains("agy-stringing-badge") ||
+                m.target.classList.contains("agy-srvmgr-btn")
+            )) return;
+        }
+
         if (scanScheduled) return;
         scanScheduled = true;
-        setTimeout(() => { scanScheduled = false; searchAndAttach(); }, 300);
+        setTimeout(() => { scanScheduled = false; searchAndAttach(); }, 500);
     });
     observer.observe(document.body, { childList: true, subtree: true });
-    setInterval(searchAndAttach, 1000);
+
+    setInterval(() => {
+        const hasSlider = Boolean(document.querySelector(".agy-speed-fine"));
+        const hasCard = Boolean(document.querySelector(".agy-telemetry-card"));
+        const hasBtn = Boolean(document.querySelector(".agy-srvmgr-btn"));
+        if (!hasSlider || !hasCard || !hasBtn || !activeVideo) {
+            searchAndAttach();
+        }
+    }, 3000);
     searchAndAttach();
 })();
