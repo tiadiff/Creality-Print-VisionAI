@@ -1015,7 +1015,7 @@
                 } else if (state === "calibrating") {
                     badge.className = "agy-str-badge calib";
                     txt.textContent = "Stringing AI · Calibrazione...";
-                } else if (state === "monitoring") {
+                } else if (state === "monitoring" || state === "standby") {
                     const isBackoff = Number(st.backoff_level || 0) > 0;
                     const ignCount = Number(st.ignored_count || 0);
                     badge.className = "agy-str-badge ok";
@@ -1029,8 +1029,8 @@
                     badge.className = "agy-str-badge muted";
                     txt.textContent = "Stringing AI · Stampante in pausa";
                 } else {
-                    badge.className = "agy-str-badge muted";
-                    txt.textContent = "Stringing AI · Standby";
+                    badge.className = "agy-str-badge ok";
+                    txt.textContent = "Stringing AI · Attiva";
                 }
                 if (dot) dot.style.opacity = "1";
             }
@@ -1316,7 +1316,9 @@
         const badge = uiContainer.querySelector("#aiBadge");
         if (!panel || !badge || !panel.classList.contains("open")) return;
         const r = badge.getBoundingClientRect();
-        const top = Math.max(8, Math.round(r.bottom + 8));
+        const rStr = (stringingBadgeEl && stringingBadgeEl.offsetParent !== null) ? stringingBadgeEl.getBoundingClientRect() : null;
+        const bottomMax = rStr ? Math.max(r.bottom, rStr.bottom) : r.bottom;
+        const top = Math.max(8, Math.round(bottomMax + 8));
         const right = Math.max(8, Math.round(window.innerWidth - r.right));
         const maxW = Math.min(650, Math.max(320, window.innerWidth - 24));
         panel.style.position = "fixed";
@@ -1422,8 +1424,8 @@
                 .agy-srv-err{display:none;margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.35);color:#FCA5A5;font-size:10px;line-height:1.35;word-break:break-word}
                 .agy-srv-logs{display:none;margin-top:8px;padding:7px 8px;border-radius:6px;background:#111113;border:1px solid rgba(255,255,255,.08);color:#a1a1aa;font-family:Consolas,monospace;font-size:9.5px;line-height:1.35;max-height:110px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
 
-                /* Stringing AI left badge & camera alert card */
-                #agyStringingHost{position:absolute;top:10px;left:12px;z-index:998;display:flex;flex-direction:column;gap:8px;pointer-events:none;font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif}
+                /* Stringing AI badge (stacked directly below upscaler badge in top-right) & camera alert card */
+                #agyStringingHost{position:absolute;top:50px;right:12px;z-index:998;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif}
                 .agy-str-badge{pointer-events:auto;position:relative;overflow:hidden;display:inline-flex;align-items:center;gap:7px;padding:6px 12px;background:rgba(24,24,26,.88);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.12);border-radius:8px;color:#e8e8ea;cursor:pointer;font-size:12px;font-weight:500;box-shadow:0 2px 10px rgba(0,0,0,.35);width:fit-content}
                 .agy-str-badge:hover{background:rgba(36,36,39,.94);border-color:rgba(255,255,255,.24)}
                 .agy-str-dot{width:7px;height:7px;border-radius:50%;background:#17CC5F;flex:none}
@@ -1637,11 +1639,9 @@
                     <div style="font-size:11px;color:#cbd5e1;margin-bottom:4px;font-weight:600">Zone segnalate (ignora falso allarme):</div>
                     <div id="agyAlertRegionsList" style="display:flex;flex-direction:column;gap:4px"></div>
                 </div>
-                <img class="agy-str-alert-img" alt="Snapshot stringing AI" onerror="this.style.display='none'">
                 <div class="agy-str-alert-actions">
                     <button type="button" class="primary" id="btnAlertAck">Segna tutti letti &amp; Continua</button>
                     <button type="button" id="btnAlertReset">Ricalibra scena</button>
-                    <button type="button" id="btnAlertDismiss">Chiudi</button>
                 </div>
             </div>
         `;
@@ -1663,15 +1663,6 @@
         strHost.querySelector("#btnAlertReset").addEventListener("click", (e) => {
             e.stopPropagation();
             sendStringingAction("reset", "stringing_reset");
-        });
-        strHost.querySelector("#btnAlertDismiss").addEventListener("click", (e) => {
-            e.stopPropagation();
-            if (stringingStatus && stringingStatus.alert && stringingStatus.alert.timestamp) {
-                alertDismissedAt = Number(stringingStatus.alert.timestamp);
-            } else {
-                alertDismissedAt = Date.now() / 1000;
-            }
-            updateStringingUI();
         });
 
         window.__updateUI = function () {
@@ -1719,10 +1710,61 @@
             }
         });
 
-        q("#srvModeSelect").addEventListener("change", (e) => { settings.serverMode = e.target.value; saveSettings(); });
-        q("#btnSrvStart").addEventListener("click", (e) => { e.stopPropagation(); controlServerAction("start"); });
+        q("#srvModeSelect").addEventListener("change", (e) => {
+            settings.serverMode = e.target.value;
+            saveSettings();
+            if (settings.serverMode === "full_gpu") {
+                settings.enabled = true;
+                saveSettings();
+                const wrap = q("#upscaleControlsWrap");
+                const msg = q("#upscaleDisabledMsg");
+                if (wrap) wrap.style.display = "";
+                if (msg) msg.style.display = "none";
+                const tgl = q("#aiToggle");
+                if (tgl) tgl.checked = true;
+                if (canvas) canvas.style.display = "block";
+                sendConfigToService();
+                connectAIWebSocket();
+                updateBadge();
+            }
+        });
+        q("#btnSrvStart").addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (settings.serverMode === "full_gpu") {
+                settings.enabled = true;
+                saveSettings();
+                const wrap = q("#upscaleControlsWrap");
+                const msg = q("#upscaleDisabledMsg");
+                if (wrap) wrap.style.display = "";
+                if (msg) msg.style.display = "none";
+                const tgl = q("#aiToggle");
+                if (tgl) tgl.checked = true;
+                if (canvas) canvas.style.display = "block";
+                sendConfigToService();
+                connectAIWebSocket();
+                updateBadge();
+            }
+            controlServerAction("start");
+        });
         q("#btnSrvStop").addEventListener("click", (e) => { e.stopPropagation(); controlServerAction("stop"); });
-        q("#btnSrvRestart").addEventListener("click", (e) => { e.stopPropagation(); controlServerAction("restart"); });
+        q("#btnSrvRestart").addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (settings.serverMode === "full_gpu") {
+                settings.enabled = true;
+                saveSettings();
+                const wrap = q("#upscaleControlsWrap");
+                const msg = q("#upscaleDisabledMsg");
+                if (wrap) wrap.style.display = "";
+                if (msg) msg.style.display = "none";
+                const tgl = q("#aiToggle");
+                if (tgl) tgl.checked = true;
+                if (canvas) canvas.style.display = "block";
+                sendConfigToService();
+                connectAIWebSocket();
+                updateBadge();
+            }
+            controlServerAction("restart");
+        });
         q("#btnSrvLogs").addEventListener("click", (e) => {
             e.stopPropagation();
             serverLogsVisible = !serverLogsVisible;
@@ -2207,23 +2249,25 @@
                 box-sizing: border-box;
             }
             .agy-telemetry-card {
-                flex: 1 1 240px !important;
-                min-width: 0 !important;
-                min-height: 0 !important;
-                height: auto !important;
-                align-self: center !important;
-                padding: 6px 12px !important;
+                flex: 0 0 250px !important;
+                width: 250px !important;
+                min-width: 250px !important;
+                max-width: 250px !important;
+                height: 120px !important;
+                min-height: 120px !important;
+                max-height: 120px !important;
+                align-self: flex-start !important;
+                padding: 10px 12px !important;
                 background-color: var(--primary-new-detail-card-bg-color, #2B2B2B) !important;
                 border-radius: 6px !important;
                 font-size: 13px !important;
                 color: var(--primary-card-right-value-text-color, #FFFFFF) !important;
                 box-sizing: border-box !important;
                 display: flex !important;
-                flex-direction: row !important;
-                align-items: center !important;
+                flex-direction: column !important;
                 justify-content: space-between !important;
-                gap: 10px !important;
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22) !important;
+                overflow: hidden !important;
             }
             .agy-telemetry-row > .agy-telemetry-card {
                 width: 100% !important;
@@ -2912,20 +2956,30 @@
         ensureSharedStyles();
         const fanCtrlRow = findFanControlRow(panelContainer, speedCtrlRow);
 
-        // 1. Side card (next to Modello di ventilatore) - compact, sleek, single-row layout
+        // 1. Side card (next to Modello di ventilatore) - 250px x 120px layout matching native cards
         let card = panelContainer.querySelector(".agy-telemetry-card");
         const compactCardHtml = `
-            <div class="agy-tel-badge" title="Attività ugello in tempo reale">
-                <span class="agy-tel-badge-dot"></span>
-                <span class="agy-tel-badge-txt">In attesa...</span>
+            <div class="agy-tel-head-row" style="display:flex;align-items:center;justify-content:space-between;width:100%;height:24px">
+                <span class="agy-tel-title" style="font-size:13px;font-weight:600;color:var(--primary-card-right-value-text-color,#fff);display:flex;align-items:center;gap:5px">
+                    <span>🎯</span><span>Attivit&agrave; Ugello</span>
+                </span>
+                <button type="button" class="agy-crono-btn" title="Apri Report CronoPrint HTML (storico stampe e statistiche nel browser)">
+                    <span class="agy-crono-icon">📊</span>
+                    <span class="agy-crono-txt">CronoPrint</span>
+                </button>
             </div>
-            <div class="agy-tel-speed-val muted" title="Velocità estrusione">
-                <span class="agy-tel-speed-num">0.0</span><span class="agy-unit">mm/s</span>
+            <div class="agy-tel-mid-row" style="display:flex;align-items:center;width:100%;height:34px">
+                <div class="agy-tel-badge" title="Attività ugello in tempo reale" style="max-width:100%;padding:4px 10px;font-size:12px">
+                    <span class="agy-tel-badge-dot"></span>
+                    <span class="agy-tel-badge-txt">In attesa...</span>
+                </div>
             </div>
-            <button type="button" class="agy-crono-btn" title="Apri Report CronoPrint HTML (storico stampe e statistiche nel browser)">
-                <span class="agy-crono-icon">📊</span>
-                <span class="agy-crono-txt">CronoPrint</span>
-            </button>
+            <div class="agy-tel-bot-row" style="display:flex;align-items:flex-end;justify-content:space-between;width:100%;height:26px">
+                <div class="agy-tel-speed-val muted" title="Velocità estrusione">
+                    <span class="agy-tel-speed-num" style="font-size:18px;font-weight:700">0.0</span><span class="agy-unit" style="font-size:11px;font-weight:normal;margin-left:3px">mm/s</span>
+                </div>
+                <span class="agy-tel-extra" style="font-size:11px;color:#8E8E93">velocit&agrave; estrusione</span>
+            </div>
         `;
         if (!card) {
             card = document.createElement("div");
@@ -2938,7 +2992,7 @@
                 panelContainer.insertBefore(card, speedCtrlRow);
             }
         } else {
-            if (!card.querySelector(".agy-crono-btn") || card.querySelector(".agy-tel-head") || card.querySelector(".agy-tel-title")) {
+            if (!card.querySelector(".agy-crono-btn") || !card.querySelector(".agy-tel-head-row")) {
                 card.innerHTML = compactCardHtml;
             }
             if (fanCtrlRow) {

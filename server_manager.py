@@ -594,15 +594,42 @@ class CronoPrintLauncher:
     def _open_html(self, target_path: str) -> bool:
         if not target_path or not os.path.isfile(target_path):
             return False
+        abs_target = os.path.abspath(target_path)
+        # Search for modern browsers on Windows to bypass broken IE association
+        browser_candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ]
+        for b in browser_candidates:
+            if os.path.isfile(b):
+                try:
+                    subprocess.Popen([b, abs_target])
+                    return True
+                except Exception:
+                    pass
+        # Try powershell Start-Process
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Start-Process '{abs_target}'"],
+                check=False,
+                timeout=5,
+            )
+            return True
+        except Exception:
+            pass
         if os.name == "nt":
             try:
-                os.startfile(target_path)
+                os.startfile(abs_target)
                 return True
             except Exception:
                 pass
         try:
             import webbrowser
-            return webbrowser.open(f"file:///{os.path.abspath(target_path).replace(os.sep, '/')}")
+            return webbrowser.open(f"file:///{abs_target.replace(os.sep, '/')}")
         except Exception as exc:
             with self._lock:
                 self.last_error = f"Impossibile aprire browser: {exc}"

@@ -1465,10 +1465,6 @@ class StringingWatchdog:
             if sess.paused_by_ai and printer_state == "paused":
                 sess.ai_state = "paused_by_ai"
                 sess.streak_sec = 0.0
-            elif not is_active_print:
-                sess.ema_score = 0.25 * frame_score + 0.75 * sess.ema_score
-                sess.streak_sec = max(0.0, sess.streak_sec - dt * 2.0)
-                sess.ai_state = "calibrating" if sess.calibration_left > 0 else ("paused" if printer_state == "paused" else "standby")
             elif sess.calibration_left > 0 or sess.exposure_skip_left > 0:
                 sess.ai_state = "calibrating"
                 sess.streak_sec = 0.0
@@ -1499,7 +1495,7 @@ class StringingWatchdog:
                     sess.alert_snapshot_jpeg = snap
                     sess.latest_annotated_jpeg = snap
 
-                    can_pause = cfg.auto_pause and (not sess.paused_by_ai) and (cur_time >= sess.cooldown_until)
+                    can_pause = cfg.auto_pause and is_active_print and (not sess.paused_by_ai) and (cur_time >= sess.cooldown_until)
                     alert_ts = time.strftime("%H:%M:%S", time.localtime(cur_time))
                     sess.alert_info = {
                         "timestamp": cur_time,

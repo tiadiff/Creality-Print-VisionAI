@@ -609,7 +609,33 @@ async def handle_cronoprint_launch(request):
     html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
     opened = False
     if os.path.isfile(html_path):
-        if os.name == "nt":
+        browser_candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ]
+        for b in browser_candidates:
+            if os.path.isfile(b):
+                try:
+                    subprocess.Popen([b, html_path])
+                    opened = True
+                    break
+                except Exception:
+                    pass
+        if not opened:
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", f"Start-Process '{html_path}'"],
+                    check=False,
+                    timeout=5,
+                )
+                opened = True
+            except Exception:
+                pass
+        if not opened and os.name == "nt":
             try:
                 os.startfile(html_path)
                 opened = True
