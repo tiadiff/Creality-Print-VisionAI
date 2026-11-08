@@ -438,9 +438,10 @@ The v1.1.0 update reorganizes the in-app control panel (`#aiPanel` in [`upscale.
 ### 3. Redesigned Extrusion Activity, Comprehensive Startup Reporting & CronoPrint Integration
 
 To ensure an ultra-clean, perfectly proportioned UI that seamlessly aligns with native Creality Print widgets:
-* **Compact Activity Card (`.agy-telemetry-card`):** Mounted in Row 2 directly alongside Creality's native *Modello di ventilatore* card:
-  * **Unified Geometry:** Slimmed down to an ergonomic profile perfectly aligned with adjacent controls, free of visual clutter. Redundant nozzle/bed temperatures, the red "Stop AI" button, and the "Live" badge have been removed from this card (lifecycle controls remain fully accessible inside the expandable `#aiPanel`).
-  * **Integrated CronoPrint Button (`[ 📊 CronoPrint ]`):** A high-visibility, translucent emerald quick-launch button mounted in the card header. Clicking it triggers the local supervisor (`/control/cronoprint/launch`) to silently execute [`Avvia_SparkX_Console.bat`](CronoPrint/Avvia_SparkX_Console.bat) without terminal popups, automatically bringing existing instances to the foreground if already open.
+* **Ultra-Compact Single-Row Activity Card (`.agy-telemetry-card`):** Mounted in Row 2 directly alongside Creality's native *Modello di ventilatore* card:
+  * **Ultra-Low Profile Geometry (~36px height):** Drastically reduced from 120px/90px to an ergonomic ~36px single-row pill layout, saving over 65% vertical screen space. Redundant headers (such as the "Attività ugello" title), temperature gauges, red "Stop AI" buttons, and "Live" pills have been completely removed from this card.
+  * **Balanced Horizontal Alignment:** Neatly unifies the live activity badge (e.g. `● Parete esterna`, `● Riempimento`, `● Supporti`, `● In calibrazione`), high-contrast tabular nozzle velocity (`142.3 mm/s`), and the CronoPrint launcher into a single harmonious baseline.
+  * **Direct HTML Browser Launch (`[ 📊 CronoPrint ]`):** A high-visibility, translucent emerald quick-launch button. Clicking it triggers the supervisor `/control/cronoprint/launch` or `:8088/cronoprint/launch` to immediately open the generated interactive [`printer_history.html`](CronoPrint/printer_history.html) report in the user's default desktop web browser (via native Windows `os.startfile`), concurrently initiating background cache synchronization with Moonraker and serving the live report over HTTP at `/cronoprint`.
   * **Granular Startup & Calibration Telemetry:** When a print starts or during calibration sequences, the card moves beyond generic status and reports exact machine activities in real time:
     * *Riscaldamento piatto:* Displays live temperature convergence against target (e.g. `45 / 70 °C`).
     * *Riscaldamento ugello:* Displays live nozzle heat-up progress against target (e.g. `140 / 230 °C`).
@@ -450,7 +451,7 @@ To ensure an ultra-clean, perfectly proportioned UI that seamlessly aligns with 
     * *Pulizia ugello:* Identifies motorized silicone brush and nozzle wiping routines (`WIPE` / `NOZZLE_CLEAR`).
     * *Caricamento filamento:* Indicates smart rack and extruder feed loading.
     * *Spurgo ed estrusione iniziale:* Identifies initial purge lines and nozzle prime ribbons.
-  * **High-Contrast Nozzle Speed (`mm/s`):** Displays real-time kinematic velocity paired with adaptive labeling (*Velocità estrusione*, *Velocità spostamento*, *In riscaldamento*, *In calibrazione*, *In pulizia*).
+  * **High-Contrast Nozzle Speed (`mm/s`):** Displays real-time kinematic velocity paired with tooltip descriptors (*Velocità estrusione*, *Velocità spostamento*, *In riscaldamento*, *In calibrazione*, *In pulizia*).
 * **Full-Width Telemetry Strip (`.agy-telemetry-strip`):** Injected directly above the native *Velocità di stampa* card, spanning 100% of the available container width:
   * **Top Row:** Displays the full, unclipped **Project / 3D Model Name** (`📦 Nome Oggetto`) with generous horizontal space, alongside `Layer X/Y`, job progress percentage, and elapsed / remaining time chips.
   * **Bottom Row:** Displays the complete unclipped **G-code Feature & Extrusion Line** (`G-code: Outer wall · Larghezza: 0.45 mm`) paired with real-time physical extrusion telemetry (`Filamento: X mm/s`, `Flusso: Y mm³/s`, `Fattore: Z%`).

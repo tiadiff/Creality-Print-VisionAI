@@ -62,6 +62,8 @@ CRONOPRINT_DIR = os.path.join(REPO_DIR, "CronoPrint")
 CRONOPRINT_BAT = os.path.join(CRONOPRINT_DIR, "Avvia_SparkX_Console.bat")
 CRONOPRINT_PROJECT = os.path.join(CRONOPRINT_DIR, "SparkXPrintConsole")
 CRONOPRINT_EXE = os.path.join(CRONOPRINT_PROJECT, "bin", "Release", "net8.0-windows", "SparkXPrintConsole.exe")
+CRONOPRINT_HTML = os.path.join(CRONOPRINT_DIR, "printer_history.html")
+CRONOPRINT_SCRIPT = os.path.join(CRONOPRINT_DIR, "generate_printer_report.py")
 CRONOPRINT_PROC = "sparkxprintconsole.exe"
 
 _LOCAL_ORIGIN_RE = re.compile(r"^https?://(127\.0\.0\.1|localhost)(:\d{1,5})?$", re.IGNORECASE)
@@ -549,15 +551,26 @@ class SupervisorSettings:
 
 
 class CronoPrintLauncher:
-    """Launches the integrated CronoPrint console silently (hidden console, no terminal window)."""
+    """Launches the integrated CronoPrint report (HTML) directly in the user's browser, refreshing data in the background."""
 
-    def __init__(self, bat_path: str = CRONOPRINT_BAT, exe_path: str = CRONOPRINT_EXE) -> None:
+    def __init__(
+        self,
+        bat_path: str = CRONOPRINT_BAT,
+        exe_path: str = CRONOPRINT_EXE,
+        html_path: str = CRONOPRINT_HTML,
+        script_path: str = CRONOPRINT_SCRIPT,
+        ctrl_port: int = CTRL_PORT,
+    ) -> None:
         self.bat_path = bat_path
         self.exe_path = exe_path
+        self.html_path = html_path
+        self.script_path = script_path
+        self.ctrl_port = ctrl_port
         self._lock = threading.Lock()
-        self.phase = "idle"  # idle | building | launching | error
+        self.phase = "idle"  # idle | refreshing | launching | error
         self.last_error = ""
         self.last_launch_at = 0.0
+        self.last_refresh_at = 0.0
 
     def _running_pids(self) -> List[int]:
         return sorted(cp_lifecycle.find_pids([CRONOPRINT_PROC]))
@@ -565,140 +578,89 @@ class CronoPrintLauncher:
     def status(self) -> Dict[str, Any]:
         pids = self._running_pids()
         with self._lock:
-            phase = self.phase
-            if phase == "launching" and (pids or (time.time() - self.last_launch_at) > 90.0):
-                self.phase = phase = "idle"
             return {
                 "ok": True,
-                "installed": os.path.isfile(self.bat_path),
+                "installed": os.path.isfile(self.script_path) or os.path.isfile(self.bat_path),
                 "built": os.path.isfile(self.exe_path),
+                "html_exists": os.path.isfile(self.html_path),
+                "html_path": self.html_path,
                 "running": bool(pids),
                 "pids": pids,
-                "phase": phase,
+                "phase": self.phase,
                 "last_error": self.last_error,
                 "bat_path": self.bat_path,
             }
 
-    @staticmethod
-    def _focus_pids(pids: List[int]) -> bool:
-        """Restore & bring the CronoPrint main window to the foreground (best effort)."""
-        if os.name != "nt" or not pids:
+    def _open_html(self, target_path: str) -> bool:
+        if not target_path or not os.path.isfile(target_path):
             return False
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            wanted = set(int(p) for p in pids)
-            found: List[int] = []
-
-            @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-            def _enum(hwnd, _lparam):
-                if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) <= 0:
-                    return True
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if int(pid.value) in wanted:
-                    found.append(hwnd)
-                    return False
+        if os.name == "nt":
+            try:
+                os.startfile(target_path)
                 return True
-
-            user32.EnumWindows(_enum, 0)
-            if not found:
-                return False
-            hwnd = found[0]
-            SW_RESTORE = 9
-            if user32.IsIconic(hwnd):
-                user32.ShowWindow(hwnd, SW_RESTORE)
-            user32.SetForegroundWindow(hwnd)
-            return True
-        except Exception:
+            except Exception:
+                pass
+        try:
+            import webbrowser
+            return webbrowser.open(f"file:///{os.path.abspath(target_path).replace(os.sep, '/')}")
+        except Exception as exc:
+            with self._lock:
+                self.last_error = f"Impossibile aprire browser: {exc}"
             return False
 
-    def _build_then_launch(self) -> None:
-        dotnet = shutil.which("dotnet")
-        if not dotnet:
-            with self._lock:
-                self.phase = "error"
-                self.last_error = "CronoPrint non compilato e .NET SDK non trovato (dotnet)."
-            return
+    def _generate_report_sync(self, timeout: float = 30.0) -> bool:
+        if not os.path.isfile(self.script_path):
+            return False
+        py_exe = _resolve_python_exe()
         try:
             res = subprocess.run(
-                [dotnet, "build", CRONOPRINT_PROJECT, "-c", "Release", "-nologo", "-v", "q"],
-                cwd=CRONOPRINT_DIR,
+                [py_exe, self.script_path, "--output", self.html_path],
+                cwd=os.path.dirname(self.script_path),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=240,
+                timeout=timeout,
                 creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-            ok = res.returncode == 0 and os.path.isfile(self.exe_path)
-        except Exception as exc:
-            ok = False
-            with self._lock:
-                self.last_error = f"Compilazione CronoPrint fallita: {exc}"
-        if not ok:
-            with self._lock:
-                self.phase = "error"
-                if not self.last_error:
-                    self.last_error = "Compilazione CronoPrint fallita (dotnet build -c Release)."
-            return
-        self._spawn_bat()
-
-    def _spawn_bat(self) -> None:
-        try:
-            # stdin=DEVNULL makes any `pause` inside the batch return immediately, so a hidden
-            # console can never hang waiting for a keypress nobody can see.
-            subprocess.Popen(
-                ["cmd.exe", "/d", "/c", self.bat_path],
-                cwd=os.path.dirname(self.bat_path),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
-                close_fds=True,
-            )
-            with self._lock:
-                self.phase = "launching"
-                self.last_launch_at = time.time()
-                self.last_error = ""
+            return res.returncode == 0 and os.path.isfile(self.html_path)
         except Exception as exc:
             with self._lock:
-                self.phase = "error"
-                self.last_error = f"Impossibile avviare CronoPrint: {exc}"
+                self.last_error = f"Generazione report fallita: {exc}"
+            return False
 
     def launch(self) -> Tuple[int, Dict[str, Any]]:
-        if not os.path.isfile(self.bat_path):
-            st = self.status()
-            st.update({"ok": False, "error": f"Launcher CronoPrint mancante: {self.bat_path}"})
-            return 404, st
+        html_exists = os.path.isfile(self.html_path)
 
-        pids = self._running_pids()
-        if pids:
-            focused = self._focus_pids(pids)
-            st = self.status()
-            st.update({"already_running": True, "focused": focused})
-            return 200, st
+        if not html_exists:
+            with self._lock:
+                self.phase = "refreshing"
+            ok = self._generate_report_sync(timeout=25.0)
+            with self._lock:
+                self.phase = "idle"
+            if not ok and not os.path.isfile(self.html_path):
+                st = self.status()
+                st.update({"ok": False, "error": self.last_error or "Report CronoPrint mancante"})
+                return 500, st
 
+        target_path = os.path.abspath(self.html_path)
+        opened = self._open_html(target_path)
         with self._lock:
-            if self.phase in ("building", "launching") and (time.time() - self.last_launch_at) < 45.0:
-                busy = True
-            else:
-                busy = False
-                self.last_error = ""
-                self.last_launch_at = time.time()
-                self.phase = "building" if not os.path.isfile(self.exe_path) else "launching"
-            phase = self.phase
-        if busy:
-            st = self.status()
-            st["busy"] = True
-            return 200, st
+            self.last_launch_at = time.time()
+            self.last_error = "" if opened else "Apertura browser non riuscita"
 
-        if phase == "building":
-            threading.Thread(target=self._build_then_launch, name="CronoPrintBuild", daemon=True).start()
-        else:
-            self._spawn_bat()
-        return 200, self.status()
+        now = time.time()
+        if (now - self.last_refresh_at) > 35.0:
+            self.last_refresh_at = now
+            threading.Thread(target=self._generate_report_sync, name="CronoPrintBgRefresh", daemon=True).start()
+
+        st = self.status()
+        st.update({
+            "ok": True,
+            "opened": opened,
+            "html_path": target_path,
+            "url": f"http://127.0.0.1:{self.ctrl_port}/cronoprint",
+        })
+        return 200, st
 
 
 def create_supervisor_server(
@@ -770,6 +732,22 @@ def create_supervisor_server(
                 st["cronoprint"] = crono.status()
                 st["settings"] = pref.snapshot()
                 self._send_json(st, origin=origin)
+            elif parsed.path in ("/cronoprint", "/cronoprint/", "/cronoprint/history.html"):
+                html_path = os.path.join(CRONOPRINT_DIR, "printer_history.html")
+                if os.path.isfile(html_path):
+                    try:
+                        with open(html_path, "rb") as f:
+                            data = f.read()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(data)))
+                        self._send_cors(origin)
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+                    except Exception:
+                        pass
+                self._send_json({"ok": False, "error": "Report CronoPrint non ancora generato"}, status=404, origin=origin)
             elif parsed.path == "/control/cronoprint":
                 self._send_json(crono.status(), origin=origin)
             elif parsed.path == "/control/settings":

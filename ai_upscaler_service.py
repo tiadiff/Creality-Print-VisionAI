@@ -32,13 +32,14 @@ import onnxruntime as ort
 from aiohttp import web
 
 from printer_telemetry import PrinterTelemetryTracker, validate_printer_ip
-from stringing_detector import StringingWatchdog
+from stringing_detector import StringingWatchdog, context_from_telemetry
 
 import cp_lifecycle
 
 HOST = "127.0.0.1"
 PORT = 8088
 BASE = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = BASE
 MODEL_PATH = os.path.join(BASE, "models", "realesr_animevideo_v3_fused.onnx")
 MOONRAKER_URL = "http://192.168.78.50:7125"
 DEFAULT_PRINTER_IP = urllib.parse.urlparse(MOONRAKER_URL).hostname or "192.168.78.50"
@@ -558,6 +559,41 @@ async def handle_snapshot(request):
     return web.Response(body=latest_jpeg, content_type="image/jpeg", headers=CORS)
 
 
+async def handle_cronoprint_launch(request):
+    html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
+    opened = False
+    if os.path.isfile(html_path):
+        if os.name == "nt":
+            try:
+                os.startfile(html_path)
+                opened = True
+            except Exception:
+                pass
+        if not opened:
+            try:
+                import webbrowser
+                webbrowser.open(f"file:///{html_path.replace(os.sep, '/')}")
+                opened = True
+            except Exception:
+                pass
+    return web.json_response(
+        {"ok": True, "opened": opened, "html_path": html_path, "type": "html_report"},
+        headers=CORS,
+    )
+
+
+async def handle_cronoprint_html(request):
+    html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
+    if os.path.isfile(html_path):
+        try:
+            with open(html_path, "rb") as f:
+                content = f.read()
+            return web.Response(body=content, content_type="text/html", charset="utf-8", headers=CORS)
+        except Exception as exc:
+            return web.Response(status=500, text=f"Error reading report: {exc}", headers=CORS)
+    return web.Response(status=404, text="Report CronoPrint non ancora generato", headers=CORS)
+
+
 async def handle_server_stop(request):
     global _shutdown_event
     loop = asyncio.get_running_loop()
@@ -591,9 +627,15 @@ app.router.add_post("/ai/stringing/reset_sensitivity", handle_stringing_reset_se
 app.router.add_get("/ai/stringing/clear_ignored", handle_stringing_clear_ignored)
 app.router.add_post("/ai/stringing/clear_ignored", handle_stringing_clear_ignored)
 app.router.add_get("/ai/stringing/snapshot", handle_stringing_snapshot)
+app.router.add_get("/cronoprint/launch", handle_cronoprint_launch)
+app.router.add_post("/cronoprint/launch", handle_cronoprint_launch)
+app.router.add_get("/cronoprint", handle_cronoprint_html)
+app.router.add_get("/cronoprint/history.html", handle_cronoprint_html)
 for _cors_route in (
     "/status",
     "/server/stop",
+    "/cronoprint/launch",
+    "/cronoprint",
     "/printer/telemetry",
     "/printer/get_speed",
     "/printer/set_speed",

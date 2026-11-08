@@ -1364,6 +1364,31 @@ def create_standalone_server(
                         self._send_json({"ok": False, "error": "No snapshot available yet"}, status=404)
                         return
                     self._send_bytes(jpeg, "image/jpeg")
+                elif parsed.path in ("/cronoprint", "/cronoprint/", "/cronoprint/history.html"):
+                    html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
+                    if os.path.isfile(html_path):
+                        with open(html_path, "rb") as f:
+                            self._send_bytes(f.read(), "text/html; charset=utf-8")
+                        return
+                    self._send_json({"ok": False, "error": "Report CronoPrint non ancora generato"}, status=404)
+                elif parsed.path == "/cronoprint/launch":
+                    html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
+                    opened = False
+                    if os.path.isfile(html_path):
+                        if os.name == "nt":
+                            try:
+                                os.startfile(html_path)
+                                opened = True
+                            except Exception:
+                                pass
+                        if not opened:
+                            try:
+                                import webbrowser
+                                webbrowser.open(f"file:///{html_path.replace(os.sep, '/')}")
+                                opened = True
+                            except Exception:
+                                pass
+                    self._send_json({"ok": True, "opened": opened, "html_path": html_path, "type": "html_report"})
                 elif parsed.path == "/status":
                     self._send_json(
                         {
@@ -1391,7 +1416,25 @@ def create_standalone_server(
             qs = urllib.parse.parse_qs(parsed.query)
             ip_raw = (qs.get("ip") or [None])[0]
             try:
-                if parsed.path == "/ai/stringing/analyze":
+                if parsed.path == "/cronoprint/launch":
+                    html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
+                    opened = False
+                    if os.path.isfile(html_path):
+                        if os.name == "nt":
+                            try:
+                                os.startfile(html_path)
+                                opened = True
+                            except Exception:
+                                pass
+                        if not opened:
+                            try:
+                                import webbrowser
+                                webbrowser.open(f"file:///{html_path.replace(os.sep, '/')}")
+                                opened = True
+                            except Exception:
+                                pass
+                    self._send_json({"ok": True, "opened": opened, "html_path": html_path, "type": "html_report"})
+                elif parsed.path == "/ai/stringing/analyze":
                     if watchdog is None or img_decoder is None or ctx_builder is None:
                         self._send_json({"ok": False, "error": "Stringing AI module unavailable"}, status=503)
                         return
