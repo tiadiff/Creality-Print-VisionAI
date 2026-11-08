@@ -2427,6 +2427,43 @@
                 line-height: 1 !important;
             }
 
+            /* Server Manager quick-launcher button beside Sleep Mode */
+            .agy-srvmgr-btn {
+                display: inline-flex !important;
+                align-items: center !important;
+                gap: 5px !important;
+                height: 22px !important;
+                padding: 0 9px !important;
+                border-radius: 4px !important;
+                font-size: 11px !important;
+                font-weight: 600 !important;
+                letter-spacing: 0.1px !important;
+                border: 1px solid rgba(56, 189, 248, 0.45) !important;
+                background: linear-gradient(180deg, rgba(56, 189, 248, 0.18), rgba(56, 189, 248, 0.06)) !important;
+                color: #7DD3FC !important;
+                cursor: pointer !important;
+                white-space: nowrap !important;
+                flex-shrink: 0 !important;
+                transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease !important;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25) !important;
+                user-select: none !important;
+                margin-left: 10px !important;
+            }
+            .agy-srvmgr-btn:hover:not(:disabled) {
+                background: linear-gradient(180deg, rgba(56, 189, 248, 0.32), rgba(56, 189, 248, 0.14)) !important;
+                border-color: rgba(56, 189, 248, 0.85) !important;
+                color: #FFFFFF !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 6px rgba(56, 189, 248, 0.35) !important;
+            }
+            .agy-srvmgr-btn:active:not(:disabled) {
+                transform: translateY(0) !important;
+            }
+            .agy-srvmgr-btn:disabled {
+                opacity: 0.65 !important;
+                cursor: wait !important;
+            }
+
             /* Dedicated 100% full-width secondary status container (sits above Velocità di stampa) */
             .agy-telemetry-strip {
                 width: calc(100% - 20px);
@@ -2715,6 +2752,93 @@
             current_object: "",
             line_width_mm: null,
         };
+    }
+
+    async function launchServerManagerBat(btnEl) {
+        const txt = btnEl ? btnEl.querySelector(".agy-srvmgr-txt") : null;
+        if (btnEl) btnEl.disabled = true;
+        if (txt) txt.textContent = "Avvio...";
+        try {
+            const res = await fetch(`${CTRL_URL}/control/server_manager/launch`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}",
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (txt) txt.textContent = data.opened ? "Avviato!" : "Pronto";
+            } else {
+                const res2 = await fetch(`${API_URL}/server_manager/launch`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: "{}",
+                }).catch(() => null);
+                if (res2 && res2.ok) {
+                    if (txt) txt.textContent = "Avviato!";
+                } else {
+                    if (txt) txt.textContent = "Errore";
+                }
+            }
+        } catch (e) {
+            try {
+                const res2 = await fetch(`${API_URL}/server_manager/launch`, { method: "POST" });
+                if (res2 && res2.ok) {
+                    if (txt) txt.textContent = "Avviato!";
+                    return;
+                }
+            } catch (err) {}
+            if (txt) txt.textContent = "Offline";
+        } finally {
+            setTimeout(() => {
+                if (btnEl) btnEl.disabled = false;
+                if (txt) txt.textContent = "Server Manager";
+            }, 1800);
+        }
+    }
+
+    function injectSleepModeServerManagerButton() {
+        // Look for the Sleep Mode container in the native UI
+        const allSpans = document.querySelectorAll("span, div");
+        let sleepNode = null;
+        for (const el of allSpans) {
+            const t = (el.textContent || "").trim();
+            if (t === "Modalità sleep" || t === "Sleep mode") {
+                sleepNode = el;
+                break;
+            }
+        }
+        if (!sleepNode) return;
+
+        // The Sleep mode item typically lives in .print-model or similar header-left container beside an el-switch
+        const hostContainer = sleepNode.closest(".print-model") || sleepNode.closest("[class*='print-model']") || sleepNode.parentElement;
+        if (!hostContainer) return;
+
+        let btn = hostContainer.querySelector(".agy-srvmgr-btn");
+        if (!btn && hostContainer.parentElement) {
+            btn = hostContainer.parentElement.querySelector(".agy-srvmgr-btn");
+        }
+
+        if (!btn) {
+            btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "agy-srvmgr-btn";
+            btn.title = "Avvia Server Manager Supervisor (Avvia_Server_Manager.bat)";
+            btn.innerHTML = `
+                <span class="agy-srvmgr-icon">⚡</span>
+                <span class="agy-srvmgr-txt">Server Manager</span>
+            `;
+            btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                launchServerManagerBat(btn);
+            });
+
+            // Insert directly next to the sleep mode control wrapper
+            if (hostContainer.parentElement) {
+                hostContainer.parentElement.appendChild(btn);
+            } else {
+                hostContainer.appendChild(btn);
+            }
+        }
     }
 
     async function openCronoPrint(btnEl) {
@@ -3176,6 +3300,7 @@
         if (video) attachToVideo(video);
         injectSpeedSlider();
         injectTelemetryCard();
+        injectSleepModeServerManagerButton();
     }
 
     let scanScheduled = false;

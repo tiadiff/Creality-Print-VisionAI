@@ -843,6 +843,16 @@ def create_supervisor_server(
             elif parsed.path == "/control/restart":
                 code, res = sup.restart(mode=mode)
                 self._send_json(res, status=code, origin=origin)
+            elif parsed.path == "/control/server_manager/launch":
+                bat_path = os.path.abspath(os.path.join(REPO_DIR, "Avvia_Server_Manager.bat"))
+                opened = False
+                if os.path.isfile(bat_path):
+                    try:
+                        subprocess.Popen(["cmd.exe", "/c", "start", "", bat_path], cwd=REPO_DIR)
+                        opened = True
+                    except Exception as exc:
+                        opened = False
+                self._send_json({"ok": True, "opened": opened, "bat_path": bat_path}, origin=origin)
             elif parsed.path == "/control/cronoprint/launch":
                 code, res = crono.launch()
                 self._send_json(res, status=code, origin=origin)

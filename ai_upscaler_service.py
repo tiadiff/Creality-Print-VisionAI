@@ -605,6 +605,22 @@ async def handle_snapshot(request):
     return web.Response(body=latest_jpeg, content_type="image/jpeg", headers=CORS)
 
 
+async def handle_server_manager_launch(request):
+    bat_path = os.path.abspath(os.path.join(REPO_DIR, "Avvia_Server_Manager.bat"))
+    opened = False
+    if os.path.isfile(bat_path):
+        try:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", bat_path], cwd=REPO_DIR)
+            opened = True
+        except Exception:
+            opened = False
+    return web.json_response({
+        "ok": True,
+        "opened": opened,
+        "bat_path": bat_path,
+    }, headers=CORS)
+
+
 async def handle_cronoprint_launch(request):
     html_path = os.path.abspath(os.path.join(REPO_DIR, "CronoPrint", "printer_history.html"))
     opened = False
@@ -733,6 +749,8 @@ app.router.add_post("/ai/stringing/ignore_region", handle_stringing_ignore_regio
 app.router.add_get("/ai/stringing/unignore_region", handle_stringing_unignore_region)
 app.router.add_post("/ai/stringing/unignore_region", handle_stringing_unignore_region)
 app.router.add_get("/ai/stringing/snapshot", handle_stringing_snapshot)
+app.router.add_get("/server_manager/launch", handle_server_manager_launch)
+app.router.add_post("/server_manager/launch", handle_server_manager_launch)
 app.router.add_get("/cronoprint/launch", handle_cronoprint_launch)
 app.router.add_post("/cronoprint/launch", handle_cronoprint_launch)
 app.router.add_get("/cronoprint", handle_cronoprint_html)
@@ -740,6 +758,7 @@ app.router.add_get("/cronoprint/history.html", handle_cronoprint_html)
 for _cors_route in (
     "/status",
     "/server/stop",
+    "/server_manager/launch",
     "/cronoprint/launch",
     "/cronoprint",
     "/printer/telemetry",
