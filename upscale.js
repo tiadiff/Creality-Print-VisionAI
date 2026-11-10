@@ -75,8 +75,8 @@
     let ctrlFetchInFlight = false;
 
     const defaults = {
-        enabled: true,
-        frameGenEnabled: true,
+        enabled: false,
+        frameGenEnabled: false,
         targetFps: "auto",
         outRes: "1080p",   // 720p | 1080p | 1440p
         aiInput: "640",    // 480 | 640 | 960
@@ -85,20 +85,58 @@
         sharpness: 0.35,
         clarity: 0.0,      // display contrast, neutral
         brightness: 0.0,   // display brightness, neutral (-0.5..0.5)
-        stringingEnabled: true,
-        stringingAutoPause: true,
-        stringingSensitivity: "balanced", // low | balanced | high
+        stringingEnabled: false,
+        stringingAutoPause: false,
+        stringingSensitivity: "custom", // low | balanced | high | custom
+        stringingSensitivityPct: 25, // default 25% (conservativa, zero falsi allarmi)
+        stringingMinConfidence: "auto", // "auto" (default, synchronized with sensitivity) | number e.g. 0.80
         stringingRoi: null, // null | { x, y, w, h } normalized 0..1
-        serverMode: "auto" // auto | standalone_cpu | full_gpu
+        serverMode: "stopped" // auto | standalone_cpu | full_gpu | stopped
     };
     let settings = Object.assign({}, defaults);
     try {
-        const saved = localStorage.getItem("creality_ai_upscale_settings_v5");
-        if (saved) settings = Object.assign(settings, JSON.parse(saved));
+        const saved = localStorage.getItem("creality_ai_upscale_settings_v6");
+        if (saved) {
+            settings = Object.assign(settings, JSON.parse(saved));
+        } else {
+            // Migrazione: imposta di default ad OFF ogni server ed ogni AI
+            const oldSaved = localStorage.getItem("creality_ai_upscale_settings_v5");
+            if (oldSaved) {
+                try {
+                    const parsed = JSON.parse(oldSaved);
+                    settings = Object.assign(settings, parsed);
+                } catch (e) {}
+            }
+            settings.enabled = false;
+            settings.stringingEnabled = false;
+            settings.frameGenEnabled = false;
+            settings.serverMode = "stopped";
+            localStorage.setItem("creality_ai_upscale_settings_v6", JSON.stringify(settings));
+        }
+        if (typeof settings.stringingSensitivityPct !== "number") {
+            if (settings.stringingSensitivity === "low") settings.stringingSensitivityPct = 25;
+            else if (settings.stringingSensitivity === "high") settings.stringingSensitivityPct = 80;
+            else settings.stringingSensitivityPct = 25;
+        }
+        if (settings.stringingMinConfidence === undefined || settings.stringingMinConfidence === null || settings.stringingMinConfidence === 0.80) {
+            settings.stringingMinConfidence = "auto";
+        }
     } catch (e) {}
 
     function saveSettings() {
-        try { localStorage.setItem("creality_ai_upscale_settings_v5", JSON.stringify(settings)); } catch (e) {}
+        try { localStorage.setItem("creality_ai_upscale_settings_v6", JSON.stringify(settings)); } catch (e) {}
+    }
+
+    function getEffectiveMinConfidence(st) {
+        const s = st || stringingStatus;
+        const thr = Number((s && s.threshold) || 0.70);
+        const effBoxConf = Number((s && s.eff_box_confidence) || (thr * 0.90));
+        const confSetting = settings.stringingMinConfidence;
+        if (confSetting === "auto" || !confSetting) {
+            return effBoxConf;
+        }
+        const num = parseFloat(confSetting);
+        return isNaN(num) ? effBoxConf : Math.min(num, effBoxConf);
     }
 
     function sendConfigToService() {
@@ -115,10 +153,15 @@
     }
 
     function pushStringingConfigToService() {
+        const sensPct = Number(settings.stringingSensitivityPct || 25);
+        const minConfSetting = settings.stringingMinConfidence;
+        const minConf = (minConfSetting === "auto" || !minConfSetting) ? null : Number(minConfSetting);
         const cfg = {
             enabled: Boolean(settings.stringingEnabled),
             auto_pause: Boolean(settings.stringingAutoPause),
-            sensitivity: settings.stringingSensitivity || "balanced",
+            sensitivity: settings.stringingSensitivity || "custom",
+            sensitivity_pct: sensPct,
+            min_box_confidence: minConf,
             roi: settings.stringingRoi || null
         };
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -130,12 +173,15 @@
             stringingConfigSynced = true;
             return;
         }
-        fetch(`${API_URL}/ai/stringing/config`, {
+        fetch(`${API_URL}/ai/stringing/config?ip=${encodeURIComponent(activePrinterIp || "")}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(cfg)
-        }).then((r) => {
-            if (r.ok) stringingConfigSynced = true;
+        }).then((r) => r.json()).then((json) => {
+            stringingConfigSynced = true;
+            if (json && json.status) {
+                handleStringingStatus(json.status);
+            }
         }).catch(() => {});
     }
 
@@ -189,6 +235,7 @@
 
     // ---------------------------------------------------------------- WebSocket
     function connectAIWebSocket() {
+        if (!settings.enabled) return;
         if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
         try {
             ws = new WebSocket(WS_URL);
@@ -216,6 +263,8 @@
                             handleServiceTelemetry(msg.data);
                         } else if (msg.type === "stringing_status" && msg.data) {
                             handleStringingStatus(msg.data);
+                        } else if (msg.type === "stringing_config" && msg.status) {
+                            handleStringingStatus(msg.status);
                         }
                     } catch (e) {}
                     return;
@@ -262,7 +311,9 @@
                 inFlight = 0;
                 ensureRenderLoop();
                 updateBadge();
-                setTimeout(connectAIWebSocket, 3000);
+                if (settings.enabled) {
+                    setTimeout(connectAIWebSocket, 3000);
+                }
             };
             ws.onerror = () => { wsConnected = false; inFlight = 0; ensureRenderLoop(); updateBadge(); };
         } catch (e) {
@@ -318,7 +369,9 @@
         const tick = () => {
             if (rvfcActive !== video) return;
             srcFramesCount++;
-            sendFrameToAI();
+            if (settings.enabled || settings.stringingEnabled) {
+                sendFrameToAI();
+            }
             video.requestVideoFrameCallback(tick);
         };
         video.requestVideoFrameCallback(tick);
@@ -522,8 +575,15 @@
             return;
         }
 
-        const hasIgnored = regions.some((r) => r && r.ignored);
-        if (!hasIgnored && state !== "warning" && state !== "paused_by_ai" && state !== "alert_only" && Number(stringingStatus.score || 0) < 0.45) {
+        const minConf = getEffectiveMinConfidence(stringingStatus);
+        const validRegions = regions.filter((r) => r && (r.ignored || Number(r.score || 0) >= minConf));
+        if (!validRegions.length) {
+            if (stringingCanvas) stringingCanvas.style.pointerEvents = isRoiSelecting ? "auto" : "none";
+            return;
+        }
+
+        const hasIgnored = validRegions.some((r) => r && r.ignored);
+        if (!hasIgnored && state !== "warning" && state !== "paused_by_ai" && state !== "alert_only" && Number(stringingStatus.score || 0) < minConf) {
             if (stringingCanvas) stringingCanvas.style.pointerEvents = isRoiSelecting ? "auto" : "none";
             return;
         }
@@ -534,7 +594,8 @@
 
         stringingCtx.save();
         stringingCtx.scale(dpr, dpr);
-        regions.forEach((r) => {
+        validRegions.forEach((r) => {
+            if (!r.ignored && Number(r.score || 0) < minConf) return;
             const x = box.x + Number(r.x || 0) * box.w;
             const y = box.y + Number(r.y || 0) * box.h;
             const w = Number(r.w || 0) * box.w;
@@ -580,7 +641,8 @@
             stringingCtx.moveTo(x + w - c, y + h); stringingCtx.lineTo(x + w, y + h); stringingCtx.lineTo(x + w, y + h - c);
             stringingCtx.stroke();
 
-            const tag = `Stringing ${Math.round(Number(r.score || 0) * 100)}%`;
+            const votesStr = r.votes ? ` (${r.votes})` : "";
+            const tag = `Stringing ${Math.round(Number(r.score || 0) * 100)}%${votesStr}`;
             stringingCtx.font = '600 11px "Segoe UI", sans-serif';
             const twLbl = stringingCtx.measureText(tag).width + 10;
             const ly = y > 22 ? y - 20 : y + 4;
@@ -1025,7 +1087,8 @@
                     txt.textContent = `Stringing rilevato · ${conf}%`;
                 } else if (state === "warning") {
                     badge.className = "agy-str-badge warn";
-                    txt.textContent = `Sospetto stringing ${conf}% · ${Number(st.streak_sec || 0).toFixed(1)}s`;
+                    const votesTxt = st.packet_votes ? ` (${st.packet_votes})` : "";
+                    txt.textContent = `Sospetto stringing ${conf}%${votesTxt} · ${Number(st.streak_sec || 0).toFixed(1)}s`;
                 } else if (state === "calibrating") {
                     badge.className = "agy-str-badge calib";
                     txt.textContent = "Stringing AI · Calibrazione...";
@@ -1038,7 +1101,8 @@
                     else if (conf >= 15) badgeTxt += ` (${conf}%)`;
                     if (isBackoff) badgeTxt += " · sens. ridotta";
                     txt.textContent = badgeTxt;
-                    badge.title = `Sensibilità: ${st.sensitivity_pct || 39}% · ${st.effective_sensitivity || "default"} · ${ignCount} difetti ignorati`;
+                    const pktInfo = st.packet_size ? ` · Pacchetto 5f (${st.packet_votes || "3/5"} conf)` : "";
+                    badge.title = `Sensibilità: ${st.sensitivity_pct || 39}% · ${st.effective_sensitivity || "default"}${pktInfo} · ${ignCount} difetti ignorati`;
                 } else if (state === "paused") {
                     badge.className = "agy-str-badge muted";
                     txt.textContent = "Stringing AI · Stampante in pausa";
@@ -1060,9 +1124,12 @@
             const elStreak = uiContainer.querySelector("#hudStrStreak");
             if (st && st.ok) {
                 if (elSens) {
-                    const sensPct = st.sensitivity_pct !== undefined ? st.sensitivity_pct : Math.round((1.0 - (st.threshold || 0.65)) * 100);
+                    const sensPct = st.sensitivity_pct !== undefined ? st.sensitivity_pct : (settings.stringingSensitivityPct || 25);
                     const isBackoff = Number(st.backoff_level || 0) > 0;
-                    elSens.textContent = `${sensPct}% (soglia ${st.threshold}${isBackoff ? " · ridotta" : ""})`;
+                    const effBoxConf = getEffectiveMinConfidence(st);
+                    const minConfPct = Math.round(effBoxConf * 100);
+                    const isAuto = settings.stringingMinConfidence === "auto" || !settings.stringingMinConfidence;
+                    elSens.textContent = `${sensPct}% (soglia ${st.threshold}${isBackoff ? " · ridotta" : ""} · box ${minConfPct}%${isAuto ? " auto" : ""})`;
                     elSens.style.color = isBackoff ? "#F59E0B" : "#F2F2F4";
                 }
                 if (elIgnored) {
@@ -1105,7 +1172,8 @@
                 const activeWrap = uiContainer.querySelector("#strActiveBoxesWrap");
                 const activeList = uiContainer.querySelector("#strActiveBoxesList");
                 if (activeWrap && activeList) {
-                    const activeBoxes = (st && Array.isArray(st.regions)) ? st.regions.filter((r) => !r.ignored) : [];
+                    const minConf = getEffectiveMinConfidence(st);
+                    const activeBoxes = (st && Array.isArray(st.regions)) ? st.regions.filter((r) => !r.ignored && Number(r.score || 0) >= minConf) : [];
                     if (activeBoxes.length > 0) {
                         activeWrap.style.display = "block";
                         activeList.innerHTML = activeBoxes.map((r, idx) => `
@@ -1191,7 +1259,8 @@
                 const alertBoxesWrap = stringingAlertEl.querySelector("#agyAlertRegionsWrap");
                 const alertBoxesList = stringingAlertEl.querySelector("#agyAlertRegionsList");
                 if (alertBoxesWrap && alertBoxesList) {
-                    const alertRegions = (alert.regions || []).filter((r) => !r.ignored);
+                    const minConf = getEffectiveMinConfidence(st);
+                    const alertRegions = (alert.regions || []).filter((r) => !r.ignored && Number(r.score || 0) >= minConf);
                     if (alertRegions.length > 0) {
                         alertBoxesWrap.style.display = "block";
                         alertBoxesList.innerHTML = alertRegions.map((r, idx) => `
@@ -1233,7 +1302,7 @@
         if (!activeVideo || activeVideo.paused || activeVideo.readyState < 2 || activeVideo.videoWidth === 0) return;
 
         const now = performance.now();
-        if ((now - lastStringingPostAt) < 1500) return;
+        if ((now - lastStringingPostAt) < 450) return;
         lastStringingPostAt = now;
 
         const w = 480;
@@ -1308,7 +1377,9 @@
         if (roiBannerEl.parentElement !== parent) parent.appendChild(roiBannerEl);
 
         createUI(parent);
-        connectAIWebSocket();
+        if (settings.enabled) {
+            connectAIWebSocket();
+        }
         startVideoFrameLoop(videoEl);
 
         ensureRenderLoop();
@@ -1363,7 +1434,7 @@
         uiContainer.id = "crealityUpscaleUI";
         uiContainer.style.cssText = `position:absolute;top:10px;left:12px;z-index:999;font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif;font-size:12px;user-select:none;`;
 
-        const sel = (v, cur) => (v === cur ? "selected" : "");
+        const sel = (v, cur) => (String(v) === String(cur) ? "selected" : "");
         const pct = (v) => Math.round(v * 100);
         const slider = (id, label, value, extra = "") => `
             <div class="ai-row">
@@ -1583,11 +1654,28 @@
                                     <div>Pausa automatica stampa<small>Invia PAUSA immediata alla conferma</small></div>
                                     <input type="checkbox" class="ai-switch" id="strAutoPauseToggle" ${settings.stringingAutoPause ? "checked" : ""}>
                                 </div>
-                                <div class="ai-label">Profilo sensibilit&agrave;</div>
-                                <select id="strSensSelect" class="ai-select" style="margin-bottom:8px">
-                                    <option value="low" ${sel("low", settings.stringingSensitivity)}>Conservativa (pochi falsi allarmi &middot; ~39%)</option>
-                                    <option value="balanced" ${sel("balanced", settings.stringingSensitivity)}>Bilanciata (consigliata &middot; ~59%)</option>
-                                    <option value="high" ${sel("high", settings.stringingSensitivity)}>Sensibile (intervento rapido &middot; ~83%)</option>
+                                <div class="ai-label" style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+                                    <span>Sensibilit&agrave; rilevamento Stringing:</span>
+                                    <span class="ai-num"><input type="number" id="num_str_sens" min="5" max="95" step="1" value="${settings.stringingSensitivityPct || 25}">%</span>
+                                </div>
+                                <input type="range" class="ai-range" id="slider_str_sens" min="5" max="95" step="1" value="${settings.stringingSensitivityPct || 25}" style="--v:${settings.stringingSensitivityPct || 25}%">
+                                <div style="display:flex;gap:4px;margin-top:5px;margin-bottom:8px">
+                                    <button type="button" class="ai-btn" id="btnSensQuick20" style="flex:1;font-size:10px;padding:3px 2px" title="20% - Molto conservativa (zero falsi allarmi)">20% Ultra</button>
+                                    <button type="button" class="ai-btn" id="btnSensQuick30" style="flex:1;font-size:10px;padding:3px 2px" title="30% - Conservativa raccomandata">30% Cons.</button>
+                                    <button type="button" class="ai-btn" id="btnSensQuick50" style="flex:1;font-size:10px;padding:3px 2px" title="50% - Bilanciata">50% Bil.</button>
+                                    <button type="button" class="ai-btn" id="btnSensQuick75" style="flex:1;font-size:10px;padding:3px 2px" title="75% - Molto sensibile">75% Sens.</button>
+                                </div>
+
+                                <div class="ai-label" style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;margin-bottom:4px">
+                                    <span>Certezza minima riquadri a schermo:</span>
+                                    <small style="color:#94A3B8">Filtro box video</small>
+                                </div>
+                                <select id="strMinConfSelect" class="ai-select" style="margin-bottom:8px">
+                                    <option value="auto" ${sel("auto", String(settings.stringingMinConfidence || "auto"))}>Auto (Sincronizzata con Sensibilit&agrave; · Consigliata)</option>
+                                    <option value="0.80" ${sel("0.80", String(settings.stringingMinConfidence))}>80% (Fisso &middot; Solo riquadri certi)</option>
+                                    <option value="0.75" ${sel("0.75", String(settings.stringingMinConfidence))}>75% (Fisso &middot; Più tollerante)</option>
+                                    <option value="0.85" ${sel("0.85", String(settings.stringingMinConfidence))}>85% (Fisso &middot; Molto sicuro)</option>
+                                    <option value="0.90" ${sel("0.90", String(settings.stringingMinConfidence))}>90% (Fisso &middot; Solo matasse gravi)</option>
                                 </select>
                                 <div class="ai-label" style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;margin-bottom:4px">
                                     <span>📐 Zona di monitoraggio (ROI)</span>
@@ -1618,8 +1706,8 @@
                                     <button type="button" class="ai-btn" id="btnStrResetSens" title="Ripristina la sensibilità originale impostata nel profilo (annulla il backoff)">Ripristina sensibilit&agrave;</button>
                                 </div>
                                 <div class="ai-btn-row">
-                                    <button type="button" class="ai-btn" id="btnStrReset" title="Ricalibra l'intero sfondo della camera">Ricalibra scena</button>
                                     <button type="button" class="ai-btn" id="btnStrClearIgnored" title="Ricomincia a monitorare anche le zone precedentemente ignorate" style="font-size:11px">Svuota ignorati</button>
+                                    <button type="button" class="ai-btn" id="btnStrReset" title="Ricalibra lo sfondo della camera (usare solo a piatto vuoto o se sono cambiate le luci)" style="font-size:11px;opacity:0.85">Reset camera (Avanzate)</button>
                                 </div>
                             </div>
                             <div id="strDisabledMsg" style="color:#8e8e93;font-size:11px;margin-top:4px;${settings.stringingEnabled ? "display:none" : ""}">
@@ -1713,8 +1801,8 @@
                 <div id="agyAlertRegionsList" style="display:flex;flex-direction:column;gap:4px"></div>
             </div>
             <div class="agy-str-alert-actions">
-                <button type="button" class="primary" id="btnAlertAck">Segna tutti letti &amp; Continua</button>
-                <button type="button" id="btnAlertReset">Ricalibra scena</button>
+                <button type="button" class="primary" id="btnAlertDismiss" title="Rimuove l'allarme e riprende il monitoraggio senza alterare la memoria della camera">✓ Risolto (Fili rimossi)</button>
+                <button type="button" id="btnAlertAck" title="Continua a stampare ignorando queste zone per evitare ulteriori pause">✕ Ignora zone &amp; Continua</button>
             </div>
         `;
         parent.appendChild(alertEl);
@@ -1731,13 +1819,13 @@
             e.stopPropagation();
             openAIPanel(false);
         });
+        alertEl.querySelector("#btnAlertDismiss").addEventListener("click", (e) => {
+            e.stopPropagation();
+            sendStringingAction("dismiss", "stringing_dismiss");
+        });
         alertEl.querySelector("#btnAlertAck").addEventListener("click", (e) => {
             e.stopPropagation();
             sendStringingAction("ack", "stringing_ack");
-        });
-        alertEl.querySelector("#btnAlertReset").addEventListener("click", (e) => {
-            e.stopPropagation();
-            sendStringingAction("reset", "stringing_reset");
         });
 
         window.__updateUI = function () {
@@ -1912,7 +2000,47 @@
             drawStringingOverlay();
         });
         q("#strAutoPauseToggle").addEventListener("change", (e) => { settings.stringingAutoPause = e.target.checked; saveSettings(); pushStringingConfigToService(); });
-        q("#strSensSelect").addEventListener("change", (e) => { settings.stringingSensitivity = e.target.value; saveSettings(); pushStringingConfigToService(); });
+        const strSensRange = q("#slider_str_sens"), strSensNum = q("#num_str_sens");
+        const setStrSens = (val) => {
+            const p = Math.max(5, Math.min(95, Math.round(Number(val) || 25)));
+            settings.stringingSensitivityPct = p;
+            if (p <= 28) settings.stringingSensitivity = "ultra_low";
+            else if (p <= 45) settings.stringingSensitivity = "low";
+            else if (p <= 68) settings.stringingSensitivity = "balanced";
+            else settings.stringingSensitivity = "high";
+            if (strSensRange) {
+                strSensRange.value = p;
+                strSensRange.style.setProperty("--v", `${p}%`);
+            }
+            if (strSensNum && document.activeElement !== strSensNum) {
+                strSensNum.value = p;
+            }
+            saveSettings();
+            pushStringingConfigToService();
+        };
+        if (strSensRange) strSensRange.addEventListener("input", () => setStrSens(strSensRange.value));
+        if (strSensNum) {
+            strSensNum.addEventListener("input", () => { if (strSensNum.value !== "") setStrSens(strSensNum.value); });
+            strSensNum.addEventListener("blur", () => { strSensNum.value = settings.stringingSensitivityPct || 25; });
+            strSensNum.addEventListener("keydown", (e) => e.stopPropagation());
+        }
+
+        const b20 = q("#btnSensQuick20"); if (b20) b20.addEventListener("click", () => setStrSens(20));
+        const b30 = q("#btnSensQuick30"); if (b30) b30.addEventListener("click", () => setStrSens(30));
+        const b50 = q("#btnSensQuick50"); if (b50) b50.addEventListener("click", () => setStrSens(50));
+        const b75 = q("#btnSensQuick75"); if (b75) b75.addEventListener("click", () => setStrSens(75));
+
+        const minConfEl = q("#strMinConfSelect");
+        if (minConfEl) {
+            minConfEl.addEventListener("change", (e) => {
+                const val = e.target.value;
+                settings.stringingMinConfidence = val === "auto" ? "auto" : (parseFloat(val) || "auto");
+                saveSettings();
+                pushStringingConfigToService();
+                drawStringingOverlay();
+                updateStringingUI();
+            });
+        }
         q("#btnStrSelectRoi").addEventListener("click", () => {
             isRoiSelecting = true;
             roiDragStart = null;

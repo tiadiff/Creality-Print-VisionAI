@@ -573,6 +573,15 @@ Open Creality Print, connect to your 3D printer, and open the **Device** interfa
 
 ---
 
+## Release Notes
+
+### Version 1.1.2
+- Configured all AI services (DirectML Real-ESRGAN super-resolution, background supervisor, and stringing watchdog) to default to OFF / dormant state on launch, ensuring zero background CPU/GPU resource consumption during slicer startup.
+- Added strict safety guards and graceful dormant lifecycle in `stringing_detector.py` and `server_manager.py`.
+- Improved script injection in `install_upscaler.ps1` and `upscale.js` to respect offline and disabled AI states without blocking Creality Print operations.
+
+---
+
 ## License
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for complete details.

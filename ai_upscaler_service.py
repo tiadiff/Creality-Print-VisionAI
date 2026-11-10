@@ -97,9 +97,9 @@ stats = {
     "active_clients": 0,
 }
 
-# Tunable from the UI. Defaults are deliberately neutral.
+# Tunable from the UI. Defaults are deliberately neutral and set to OFF by default.
 ai_config = {
-    "upscale_enabled": True,  # True = Real-ESRGAN GPU inference; False = native video (only stringing AI if active)
+    "upscale_enabled": False,  # False = native video (default OFF); True = Real-ESRGAN GPU inference
     "target_res": "1080p",  # output resolution: 720p / 1080p / 1440p
     "ai_blend": 1.0,        # 0 = plain resize of the camera frame, 1 = full AI output
     "hdr_shadows": 0.0,     # 0..1 shadow lift, only affects dark pixels
@@ -176,9 +176,9 @@ def process_frame(payload: bytes):
 
     if stringing_watchdog.config.enabled:
         now_pf = time.monotonic()
-        if (now_pf - _last_stringing_capture) >= 0.38:
+        if (now_pf - _last_stringing_capture) >= 0.22:
             with _stringing_frame_lock:
-                if (now_pf - _last_stringing_capture) >= 0.38:
+                if (now_pf - _last_stringing_capture) >= 0.22:
                     _last_stringing_capture = now_pf
                     sh_cur, sw_cur = out.shape[:2]
                     if sw_cur > 640:
@@ -286,7 +286,7 @@ async def ws_upscale_handler(request):
         if stringing_state["busy"] or not stringing_watchdog.config.enabled:
             return
         now_m = time.monotonic()
-        if (now_m - stringing_state["last_push"]) < 0.38:
+        if (now_m - stringing_state["last_push"]) < 0.22:
             return
         with _stringing_frame_lock:
             rgb_snap = _latest_stringing_rgb
@@ -310,7 +310,7 @@ async def ws_upscale_handler(request):
         if not ai_config.get("upscale_enabled", True):
             if stringing_watchdog.config.enabled and not stringing_state["busy"]:
                 now_m = time.monotonic()
-                if (now_m - _last_stringing_capture) >= 0.35:
+                if (now_m - _last_stringing_capture) >= 0.22:
                     _last_stringing_capture = now_m
                     rgb_frame = await loop.run_in_executor(telemetry_executor, _extract_rgb_for_stringing, data)
                     if rgb_frame is not None:
@@ -359,7 +359,12 @@ async def ws_upscale_handler(request):
                         await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
                     elif action == "stringing_config":
                         cfg = stringing_watchdog.update_config(data.get("config") or data)
-                        await ws.send_str(json.dumps({"type": "stringing_config", "config": cfg}))
+                        st = stringing_watchdog.get_status(data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "stringing_config", "config": cfg, "status": st}))
+                        await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
+                    elif action == "stringing_dismiss":
+                        st = stringing_watchdog.dismiss_alert(data.get("ip") or active_printer_ip)
+                        await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
                     elif action == "stringing_reset":
                         st = stringing_watchdog.reset_baseline(data.get("ip") or active_printer_ip)
                         await ws.send_str(json.dumps({"type": "stringing_status", "data": st}))
@@ -498,8 +503,18 @@ async def handle_stringing_config(request):
             cfg = stringing_watchdog.update_config(data or {})
         else:
             cfg = stringing_watchdog.get_config()
-        return web.json_response({"ok": True, "config": cfg}, headers=CORS)
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        st = stringing_watchdog.get_status(ip)
+        return web.json_response({"ok": True, "config": cfg, "status": st}, headers=CORS)
     except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
+
+
+async def handle_stringing_dismiss(request):
+    try:
+        ip = validate_printer_ip(request.query.get("ip"), active_printer_ip)
+        return web.json_response(stringing_watchdog.dismiss_alert(ip), headers=CORS)
+    except ValueError as e:
         return web.json_response({"ok": False, "error": str(e)}, status=400, headers=CORS)
 
 
@@ -740,6 +755,8 @@ app.router.add_get("/ai/stringing/reset", handle_stringing_reset)
 app.router.add_post("/ai/stringing/reset", handle_stringing_reset)
 app.router.add_get("/ai/stringing/ack", handle_stringing_ack)
 app.router.add_post("/ai/stringing/ack", handle_stringing_ack)
+app.router.add_get("/ai/stringing/dismiss", handle_stringing_dismiss)
+app.router.add_post("/ai/stringing/dismiss", handle_stringing_dismiss)
 app.router.add_get("/ai/stringing/reset_sensitivity", handle_stringing_reset_sens)
 app.router.add_post("/ai/stringing/reset_sensitivity", handle_stringing_reset_sens)
 app.router.add_get("/ai/stringing/clear_ignored", handle_stringing_clear_ignored)

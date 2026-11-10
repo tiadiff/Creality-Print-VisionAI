@@ -53,6 +53,27 @@ def threshold_to_sensitivity_pct(thr: float) -> int:
     """
     pct = (0.92 - float(thr)) / (0.92 - 0.48) * 80.0 + 10.0
     return max(5, min(95, int(round(pct))))
+
+
+def sensitivity_pct_to_threshold(pct: float) -> float:
+    """
+    Inverse mapping: converts human-readable sensitivity % (5%..95%)
+    to internal detection threshold (0.95..0.40).
+    Lower sensitivity % -> higher threshold (conservative, requires stronger evidence).
+    """
+    clamped = max(5.0, min(95.0, float(pct)))
+    thr = 0.92 - ((clamped - 10.0) / 80.0) * (0.92 - 0.48)
+    return round(float(np.clip(thr, 0.40, 0.95)), 3)
+
+
+def sensitivity_pct_to_confirm_seconds(pct: float) -> float:
+    """
+    Map sensitivity % to required temporal confirmation streak in seconds.
+    Lower sensitivity -> longer confirmation requirement (e.g. 10% -> 9.5s, 90% -> 3.2s).
+    """
+    clamped = max(5.0, min(95.0, float(pct)))
+    secs = 9.5 - ((clamped - 10.0) / 80.0) * (9.5 - 3.2)
+    return round(float(np.clip(secs, 2.0, 15.0)), 1)
 _BASE_ENV_KERNEL = np.ones((5, 5), dtype=np.uint8)
 _BACKOFF_ENV_KERNEL = np.ones((7, 7), dtype=np.uint8)
 _CAND_DILATE_KERNEL = np.ones((11, 11), dtype=np.uint8)
@@ -107,49 +128,73 @@ _SHADOW_LUT = _shadow_lift_lut()
 
 @dataclass
 class StringingConfig:
-    enabled: bool = True
-    auto_pause: bool = True
-    sensitivity: str = "balanced"  # "low" | "balanced" | "high"
+    enabled: bool = False
+    auto_pause: bool = False
+    sensitivity: str = "custom"  # "ultra_low" | "low" | "balanced" | "high" | "custom"
+    sensitivity_pct: int = 25    # Explicit user sensitivity % (default 25% ultra-safe)
     custom_threshold: Optional[float] = None
     confirm_seconds: Optional[float] = None
+    min_box_confidence: Optional[float] = None  # None = auto-scale with sensitivity (default); float = explicit override
     cooldown_seconds: float = 30.0
     calibration_frames: int = 8
     roi: Optional[Dict[str, float]] = None
+    packet_size: int = 5                  # Number of sharp frames per evaluation packet
+    majority_votes_required: int = 3       # Minimum votes (e.g. 3 of 5) for confirmed consensus
+    min_sharpness: float = 35.0           # Minimum Laplacian variance for frame admission
+
+    def resolved_min_box_confidence(self, eff_thr: float) -> float:
+        if self.min_box_confidence is not None:
+            return max(0.40, min(0.98, float(self.min_box_confidence)))
+        # Auto mode: scales proportionally with the active detection threshold
+        return max(0.42, min(0.85, eff_thr * 0.90))
 
     def effective_sensitivity(self, backoff_level: int = 0) -> str:
-        base = self.sensitivity if self.sensitivity in SENSITIVITY_PRESETS else "balanced"
+        base = self.sensitivity if self.sensitivity in SENSITIVITY_PRESETS else "low"
         try:
             idx = SENSITIVITY_ORDER.index(base)
         except ValueError:
-            idx = 1
+            idx = 2
         stepped = min(len(SENSITIVITY_ORDER) - 1, idx + max(0, int(backoff_level)))
         return SENSITIVITY_ORDER[stepped]
 
     def resolved_threshold(self, backoff_level: int = 0) -> float:
+        bump = 0.08 * max(0, int(backoff_level))
         if self.custom_threshold is not None:
-            bump = 0.08 * max(0, int(backoff_level))
-            return max(0.30, min(0.92, float(self.custom_threshold) + bump))
+            return max(0.30, min(0.95, float(self.custom_threshold) + bump))
+        if self.sensitivity_pct is not None:
+            base_thr = sensitivity_pct_to_threshold(self.sensitivity_pct)
+            return max(0.30, min(0.95, base_thr + bump))
         eff = self.effective_sensitivity(backoff_level)
-        return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["balanced"])[0]
+        return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["low"])[0] + bump
 
     def resolved_confirm_seconds(self, backoff_level: int = 0) -> float:
+        bump = 1.5 * max(0, int(backoff_level))
         if self.confirm_seconds is not None:
-            bump = 1.5 * max(0, int(backoff_level))
             return max(1.5, min(15.0, float(self.confirm_seconds) + bump))
+        if self.sensitivity_pct is not None:
+            base_sec = sensitivity_pct_to_confirm_seconds(self.sensitivity_pct)
+            return max(1.5, min(15.0, base_sec + bump))
         eff = self.effective_sensitivity(backoff_level)
-        return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["balanced"])[1]
+        return SENSITIVITY_PRESETS.get(eff, SENSITIVITY_PRESETS["low"])[1] + bump
 
     def to_dict(self) -> Dict[str, Any]:
         base_thr = self.resolved_threshold(0)
+        curr_pct = self.sensitivity_pct if self.sensitivity_pct is not None else threshold_to_sensitivity_pct(base_thr)
+        eff_box_conf = self.resolved_min_box_confidence(base_thr)
         return {
             "enabled": self.enabled,
             "auto_pause": self.auto_pause,
             "sensitivity": self.sensitivity,
-            "sensitivity_pct": threshold_to_sensitivity_pct(base_thr),
+            "sensitivity_pct": curr_pct,
+            "min_box_confidence": round(float(self.min_box_confidence), 2) if self.min_box_confidence is not None else "auto",
+            "eff_box_confidence": round(eff_box_conf, 2),
             "threshold": round(base_thr, 2),
             "confirm_seconds": round(self.resolved_confirm_seconds(0), 1),
             "cooldown_seconds": round(self.cooldown_seconds, 1),
             "roi": dict(self.roi) if self.roi else None,
+            "packet_size": self.packet_size,
+            "majority_votes_required": self.majority_votes_required,
+            "min_sharpness": round(float(self.min_sharpness), 1),
         }
 
 
@@ -198,6 +243,14 @@ class _IpSession:
     alert_snapshot_jpeg: Optional[bytes] = None
     latest_annotated_jpeg: Optional[bytes] = None
     last_result: Dict[str, Any] = field(default_factory=dict)
+    # 5-frame packet and sharpness consensus fields
+    packet_frames: List[Dict[str, Any]] = field(default_factory=list)
+    sharpness_baseline: float = 120.0
+    last_packet_eval_ts: float = 0.0
+    last_packet_votes: int = 0
+    last_packet_sharpness: float = 0.0
+    last_packet_confirmed: bool = False
+    discarded_blur_count: int = 0
 
 
 def _compute_roi_mask(h: int, w: int, custom_roi: Optional[Dict[str, float]] = None) -> np.ndarray:
@@ -378,6 +431,63 @@ def _box_iou(b1: Dict[str, Any], b2: Dict[str, Any]) -> float:
         return 0.0
 
 
+def _box_proximity(b1: Dict[str, Any], b2: Dict[str, Any], dist_thr: float = 0.09) -> bool:
+    """Check centroid Euclidean distance between two bounding boxes."""
+    try:
+        cx1 = float(b1["x"]) + float(b1["w"]) * 0.5
+        cy1 = float(b1["y"]) + float(b1["h"]) * 0.5
+        cx2 = float(b2["x"]) + float(b2["w"]) * 0.5
+        cy2 = float(b2["y"]) + float(b2["h"]) * 0.5
+        return math.hypot(cx1 - cx2, cy1 - cy2) <= dist_thr
+    except Exception:
+        return False
+
+
+def compute_frame_sharpness(rgb: np.ndarray) -> float:
+    """
+    Measure optical sharpness via the variance of the Laplacian.
+    Fast (sub-millisecond) metric to reject motion-blurred or vibrating frames.
+    """
+    if rgb is None or rgb.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY) if len(rgb.shape) == 3 else rgb
+    h, w = gray.shape[:2]
+    if w > 480:
+        nh = max(64, int(round(h * (480.0 / float(w)))))
+        gray = cv2.resize(gray, (480, nh), interpolation=cv2.INTER_AREA)
+    lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+    return float(lap.var())
+
+
+def is_frame_sharp_and_stable(
+    rgb: np.ndarray,
+    prev_gray: Optional[np.ndarray],
+    baseline_sharpness: float = 100.0,
+    min_sharpness_floor: float = 30.0,
+    max_motion_diff: float = 30.0,
+) -> Tuple[bool, float, float]:
+    """
+    Check if a candidate frame is sharp and free from heavy motion blur.
+    Returns (is_sharp, sharpness, motion_diff).
+    """
+    sharpness = compute_frame_sharpness(rgb)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY) if len(rgb.shape) == 3 else rgb
+    h, w = gray.shape[:2]
+    if prev_gray is not None and prev_gray.shape == (h, w):
+        motion_diff = float(cv2.absdiff(gray, prev_gray).mean())
+    else:
+        motion_diff = 0.0
+
+    if motion_diff > max_motion_diff:
+        return False, sharpness, motion_diff
+
+    thr = max(min_sharpness_floor, baseline_sharpness * 0.55)
+    if sharpness < thr:
+        return False, sharpness, motion_diff
+
+    return True, sharpness, motion_diff
+
+
 def _matches_ignored(box: Dict[str, Any], ignored_list: List[Dict[str, Any]], iou_thr: float = 0.14) -> Optional[Dict[str, Any]]:
     """
     Check whether candidate box matches an acknowledged/ignored defect footprint
@@ -491,7 +601,8 @@ def _render_evidence_jpeg(rgb: np.ndarray, regions: List[Dict[str, Any]], score:
         else:
             col = (60, 68, 239) if r["score"] >= 0.55 else (36, 191, 251)
             cv2.rectangle(bgr, (x1, y1), (x2, y2), col, 2)
-            tag = f"Stringing {int(round(r['score'] * 100))}%"
+            votes_txt = f" ({r['votes']})" if r.get("votes") else ""
+            tag = f"Stringing {int(round(r['score'] * 100))}%{votes_txt}"
             cv2.putText(bgr, tag, (x1 + 4, max(16, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, col, 1, cv2.LINE_AA)
 
     banner = f"AI Vision | {label} | Score {int(round(score * 100))}%"
@@ -569,22 +680,69 @@ class StringingWatchdog:
                                 s.last_regions = []
             if "auto_pause" in data:
                 self.config.auto_pause = bool(data["auto_pause"])
-            if "sensitivity" in data and str(data["sensitivity"]) in SENSITIVITY_PRESETS:
+            if "sensitivity_pct" in data and data["sensitivity_pct"] is not None:
+                try:
+                    pct_val = int(round(float(data["sensitivity_pct"])))
+                    self.config.sensitivity_pct = max(5, min(95, pct_val))
+                    self.config.custom_threshold = None
+                    self.config.confirm_seconds = None
+                    if self.config.sensitivity_pct <= 28:
+                        self.config.sensitivity = "ultra_low"
+                    elif self.config.sensitivity_pct <= 45:
+                        self.config.sensitivity = "low"
+                    elif self.config.sensitivity_pct <= 68:
+                        self.config.sensitivity = "balanced"
+                    else:
+                        self.config.sensitivity = "high"
+                    with self._sessions_lock:
+                        for s in self._sessions.values():
+                            s.backoff_level = 0
+                except (ValueError, TypeError):
+                    pass
+            elif "sensitivity" in data and str(data["sensitivity"]) in SENSITIVITY_PRESETS:
                 new_sens = str(data["sensitivity"])
                 sens_changed = new_sens != self.config.sensitivity
                 self.config.sensitivity = new_sens
+                self.config.sensitivity_pct = threshold_to_sensitivity_pct(SENSITIVITY_PRESETS[new_sens][0])
                 self.config.custom_threshold = None
                 self.config.confirm_seconds = None
                 if sens_changed:
                     with self._sessions_lock:
                         for s in self._sessions.values():
                             s.backoff_level = 0
+            if "min_box_confidence" in data:
+                val = data.get("min_box_confidence")
+                if val is None or val == "auto" or val == "":
+                    self.config.min_box_confidence = None
+                else:
+                    try:
+                        fval = float(val)
+                        if fval > 1.0:
+                            fval /= 100.0
+                        self.config.min_box_confidence = max(0.40, min(0.98, fval))
+                    except (ValueError, TypeError):
+                        pass
             if "threshold" in data and data["threshold"] is not None:
-                self.config.custom_threshold = max(0.25, min(0.92, float(data["threshold"])))
+                self.config.custom_threshold = max(0.25, min(0.95, float(data["threshold"])))
             if "confirm_seconds" in data and data["confirm_seconds"] is not None:
                 self.config.confirm_seconds = max(1.5, min(15.0, float(data["confirm_seconds"])))
             if "cooldown_seconds" in data and data["cooldown_seconds"] is not None:
                 self.config.cooldown_seconds = max(5.0, min(180.0, float(data["cooldown_seconds"])))
+            if "packet_size" in data and data["packet_size"] is not None:
+                try:
+                    self.config.packet_size = max(3, min(10, int(data["packet_size"])))
+                except (ValueError, TypeError):
+                    pass
+            if "majority_votes_required" in data and data["majority_votes_required"] is not None:
+                try:
+                    self.config.majority_votes_required = max(2, min(self.config.packet_size, int(data["majority_votes_required"])))
+                except (ValueError, TypeError):
+                    pass
+            if "min_sharpness" in data and data["min_sharpness"] is not None:
+                try:
+                    self.config.min_sharpness = max(10.0, min(200.0, float(data["min_sharpness"])))
+                except (ValueError, TypeError):
+                    pass
             if "roi" in data:
                 r = data["roi"]
                 if isinstance(r, dict) and "x" in r and "y" in r and "w" in r and "h" in r:
@@ -629,6 +787,10 @@ class StringingWatchdog:
             sess.last_raw_score = 0.0
             sess.streak_sec = 0.0
             sess.last_regions = []
+            sess.packet_frames.clear()
+            sess.discarded_blur_count = 0
+            sess.last_packet_votes = 0
+            sess.last_packet_confirmed = False
             sess.paused_by_ai = False
             sess.cooldown_until = cur_time + 6.0
             sess.ai_state = "calibrating"
@@ -704,6 +866,31 @@ class StringingWatchdog:
             sess.alert_info = None
             sess.alert_snapshot_jpeg = None
             sess.cooldown_until = cur_time + 4.0
+            sess.ai_state = "monitoring"
+            return self._build_status_locked(sess, cfg, cur_time=cur_time)
+
+    def dismiss_alert(self, ip: Optional[str] = None, now: Optional[float] = None, cooldown_s: float = 4.0) -> Dict[str, Any]:
+        """
+        Dismiss active stringing alert without poisoning or recalibrating the camera background.
+        Used when the user physically clears the filaments/debris or confirms it is resolved.
+        Resets streak, clears paused state, and enters clean monitoring with a brief cooldown.
+        """
+        sess = self._get_session(ip)
+        cur_time = time.time() if now is None else float(now)
+        with self._cfg_lock:
+            cfg = StringingConfig(**self.config.__dict__)
+        with sess.lock:
+            sess.streak_sec = 0.0
+            sess.ema_score = 0.0
+            sess.last_raw_score = 0.0
+            sess.last_packet_votes = 0
+            sess.last_packet_confirmed = False
+            sess.packet_frames.clear()
+            sess.last_regions = []
+            sess.paused_by_ai = False
+            sess.alert_info = None
+            sess.alert_snapshot_jpeg = None
+            sess.cooldown_until = cur_time + max(2.0, float(cooldown_s))
             sess.ai_state = "monitoring"
             return self._build_status_locked(sess, cfg, cur_time=cur_time)
 
@@ -993,7 +1180,13 @@ class StringingWatchdog:
 
         valid_vals = novel_ridge[valid]
         noise_p75 = float(np.percentile(valid_vals, 75)) if valid_vals.size > 0 else 0.0
-        thr = max(12.5 + 0.8 * min(2, backoff), (3.0 + 0.12 * min(2, backoff)) * noise_p75)
+
+        # Sensitivity scaling: higher sensitivity % lowers the ridge threshold and minimum size
+        # to detect fine/wispy transparent filaments; lower sensitivity % raises it to reject texture noise.
+        sens_pct = threshold_to_sensitivity_pct(eff_thr)
+        sens_factor = max(0.60, min(1.40, 1.35 - (float(sens_pct) / 100.0) * 0.85))
+        base_ridge_thr = 11.5 * sens_factor
+        thr = max(base_ridge_thr + 0.8 * min(2, backoff), (2.8 + 0.12 * min(2, backoff)) * noise_p75 * sens_factor)
 
         cand = ((novel_ridge > thr) & valid).astype(np.uint8)
 
@@ -1002,9 +1195,9 @@ class StringingWatchdog:
         if solid_core.any():
             cand = cand & (~cv2.dilate(solid_core, _THIN_DILATE_KERNEL))
 
-        # Keep only coherent elongated strands; filter out short PEI glitter speckles
-        min_area = 12
-        min_diag = 11.5
+        # Keep only coherent elongated strands; scale min diagonal and area dynamically with sensitivity
+        min_diag = max(7.5, min(15.0, 14.5 - (float(sens_pct) / 100.0) * 7.5))
+        min_area = max(7, min(16, int(round(15.0 - (float(sens_pct) / 100.0) * 8.0))))
         n_cc, cc_labels, cc_stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
         thin_mask = np.zeros((sh, sw), dtype=np.uint8)
         kept_ids: List[int] = []
@@ -1047,7 +1240,8 @@ class StringingWatchdog:
         tile_scores: List[float] = []
         raw_boxes: List[Dict[str, Any]] = []
         detected_cid_set = set()
-        box_min_score = max(0.45, eff_thr * 0.72)
+        eff_box_thr = self.config.resolved_min_box_confidence(eff_thr)
+        box_min_score = max(0.35, eff_box_thr * 0.75)
 
         infill_penalty = 0.0
         if ctx and ctx.feature_category == "infill" and ctx.is_extruding:
@@ -1268,6 +1462,9 @@ class StringingWatchdog:
                 best_tr["w"] = round(0.35 * float(cand["w"]) + 0.65 * float(best_tr["w"]), 4)
                 best_tr["h"] = round(0.35 * float(cand["h"]) + 0.65 * float(best_tr["h"]), 4)
                 best_tr["strands"] = max(int(best_tr.get("strands", 0)), int(cand.get("strands", 0)))
+                if cand.get("votes"):
+                    best_tr["votes"] = cand["votes"]
+                    best_tr["votes_count"] = cand.get("votes_count", 0)
                 if cand.get("ignored"):
                     best_tr["ignored"] = True
                     if cand.get("defect_id"):
@@ -1283,6 +1480,8 @@ class StringingWatchdog:
                     "h": float(cand["h"]),
                     "score": float(cand["score"]),
                     "strands": int(cand.get("strands", 1)),
+                    "votes": cand.get("votes"),
+                    "votes_count": cand.get("votes_count", 0),
                     "frames_seen": 1,
                     "consecutive_misses": 0,
                     "first_seen_ts": cur_time,
@@ -1304,21 +1503,31 @@ class StringingWatchdog:
         for tr in sess.tracked_regions:
             tr.pop("_matched", None)
             age = cur_time - float(tr.get("last_seen_ts", cur_time))
-            if age <= 1.8 and int(tr.get("consecutive_misses", 0)) <= 3:
+            misses = int(tr.get("consecutive_misses", 0))
+            seen = int(tr.get("frames_seen", 1))
+            # CRITICAL: If a candidate was only seen 1 or 2 frames and misses, purge immediately!
+            # Prevents transient glints / 2-second vanishing ghost boxes.
+            if seen < 3 and misses >= 1:
+                continue
+            if age <= 1.8 and misses <= 3:
                 survivors.append(tr)
         sess.tracked_regions = survivors
 
         # Select regions for HUD display / status:
-        # Require frames_seen >= 2 to suppress 1-frame spikes, OR ignored==True,
-        # OR in alert/warning states where defect is being confirmed.
+        # Require:
+        # 1. Ignored/acknowledged regions are always preserved for UI
+        # 2. For active stringing boxes:
+        #    - Dynamic effective box threshold: scales down if sensitivity is set high (lower eff_thr),
+        #      without dropping below 0.40 or exceeding the explicit user override.
+        #    - Must have sustained detection across at least 2 consecutive frames or >= 3 packet votes
+        eff_box_conf = self.config.resolved_min_box_confidence(eff_thr)
         output: List[Dict[str, Any]] = []
         for tr in sess.tracked_regions:
             is_ignored = bool(tr.get("ignored"))
             seen_count = int(tr.get("frames_seen", 0))
             score_val = float(tr.get("score", 0.0))
-            is_alert = (sess.streak_sec > 0.4) or sess.paused_by_ai or (sess.alert_info is not None)
 
-            if (seen_count >= 2 or is_ignored or is_alert) and score_val >= max(0.35, eff_thr * 0.50):
+            if is_ignored:
                 output.append({
                     "id": tr["id"],
                     "x": round(float(tr["x"]), 4),
@@ -1327,7 +1536,22 @@ class StringingWatchdog:
                     "h": round(float(tr["h"]), 4),
                     "score": round(score_val, 3),
                     "strands": int(tr.get("strands", 1)),
-                    "ignored": is_ignored,
+                    "votes": tr.get("votes"),
+                    "ignored": True,
+                    "defect_id": tr.get("defect_id"),
+                    "frames_seen": seen_count,
+                })
+            elif (seen_count >= 2 or int(tr.get("votes_count", 0)) >= 3) and score_val >= eff_box_conf:
+                output.append({
+                    "id": tr["id"],
+                    "x": round(float(tr["x"]), 4),
+                    "y": round(float(tr["y"]), 4),
+                    "w": round(float(tr["w"]), 4),
+                    "h": round(float(tr["h"]), 4),
+                    "score": round(score_val, 3),
+                    "strands": int(tr.get("strands", 1)),
+                    "votes": tr.get("votes"),
+                    "ignored": False,
                     "defect_id": tr.get("defect_id"),
                     "frames_seen": seen_count,
                 })
@@ -1341,7 +1565,7 @@ class StringingWatchdog:
         eff_thr = cfg.resolved_threshold(sess.backoff_level)
         base_thr = cfg.resolved_threshold(0)
         sens_pct = threshold_to_sensitivity_pct(eff_thr)
-        base_sens_pct = threshold_to_sensitivity_pct(base_thr)
+        base_sens_pct = cfg.sensitivity_pct if cfg.sensitivity_pct is not None else threshold_to_sensitivity_pct(base_thr)
         confirm_pct = min(1.0, max(0.0, sess.streak_sec / confirm_s)) if confirm_s > 0 else 0.0
         now_sec = time.time() if cur_time is None else float(cur_time)
         return {
@@ -1353,6 +1577,8 @@ class StringingWatchdog:
             "effective_sensitivity": eff_sens,
             "sensitivity_pct": sens_pct,
             "base_sensitivity_pct": base_sens_pct,
+            "min_box_confidence": round(float(cfg.min_box_confidence), 2) if cfg.min_box_confidence is not None else "auto",
+            "eff_box_confidence": round(cfg.resolved_min_box_confidence(eff_thr), 2),
             "backoff_level": int(sess.backoff_level),
             "threshold": round(eff_thr, 2),
             "base_threshold": round(base_thr, 2),
@@ -1374,6 +1600,13 @@ class StringingWatchdog:
             "alert": sess.alert_info,
             "has_snapshot": sess.alert_snapshot_jpeg is not None or sess.latest_annotated_jpeg is not None,
             "printer_state": sess.last_printer_state or "unknown",
+            "packet_size": int(cfg.packet_size),
+            "packet_progress": len(sess.packet_frames),
+            "packet_votes": f"{sess.last_packet_votes}/{cfg.packet_size}",
+            "packet_confirmed": sess.last_packet_confirmed,
+            "last_sharpness": round(sess.last_packet_sharpness, 1),
+            "sharpness_baseline": round(sess.sharpness_baseline, 1),
+            "discarded_blur_frames": sess.discarded_blur_count,
         }
 
     def analyze_frame(
@@ -1383,11 +1616,15 @@ class StringingWatchdog:
         ctx: Optional[PrinterContext] = None,
         now: Optional[float] = None,
         assume_printing_if_no_ctx: bool = False,
+        force_eval: bool = False,
     ) -> Dict[str, Any]:
         """
-        Inspect one decoded video frame (RGB uint8) and update temporal state.
-        Returns rich status dict including `auto_pause_triggered` & `should_pause_ui`
-        if sustained stringing crosses confirmation threshold during active printing.
+        Inspect video frames using 5-sharp-frame packet buffering and majority voting consensus.
+        - Computes Laplacian variance sharpness to reject motion-blurred or vibrating frames.
+        - Buffers 5 sharp, stable frames.
+        - Evaluates all 5 frames together and requires majority consensus (>= 3 out of 5 frames)
+          on the same spatial defect footprint to confirm stringing.
+        - Eliminates sporadic PEI bed reflections, shadows, and nozzle pass-overs.
         """
         t0 = time.perf_counter()
         cur_time = time.time() if now is None else float(now)
@@ -1402,6 +1639,7 @@ class StringingWatchdog:
                 sess.streak_sec = 0.0
                 sess.ema_score = 0.0
                 sess.last_regions = []
+                sess.packet_frames.clear()
                 res = self._build_status_locked(sess, cfg, cur_time=cur_time)
                 res["auto_pause_triggered"] = False
                 res["should_pause_ui"] = False
@@ -1431,19 +1669,181 @@ class StringingWatchdog:
                 sess.ema_score = 0.0
                 sess.paused_by_ai = False
                 sess.cooldown_until = max(sess.cooldown_until, cur_time + cfg.cooldown_seconds * 0.5)
+                sess.packet_frames.clear()
             sess.last_printer_state = printer_state
 
             eff_thr = cfg.resolved_threshold(sess.backoff_level)
             eff_confirm = cfg.resolved_confirm_seconds(sess.backoff_level)
 
-            # Compute CV vision score
-            frame_score, raw_regions, mean_luma, total_strands, anomaly_tiles = self._score_frame_cv(
-                sess, frame_rgb, ctx, cur_time, eff_thr=eff_thr
+            # 1. Calibration phase: direct evaluation until scene baseline is locked
+            if sess.calibration_left > 0 or sess.exposure_skip_left > 0 or sess.bg_ridge is None:
+                frame_score, raw_regions, mean_luma, total_strands, anomaly_tiles = self._score_frame_cv(
+                    sess, frame_rgb, ctx, cur_time, eff_thr=eff_thr
+                )
+                infer_ms = (time.perf_counter() - t0) * 1000.0
+                sess.frames_analyzed += 1
+                sess.avg_infer_ms = infer_ms if sess.frames_analyzed == 1 else (0.85 * sess.avg_infer_ms + 0.15 * infer_ms)
+                sess.ai_state = "calibrating"
+                sess.streak_sec = 0.0
+                sess.ema_score = 0.0
+                sess.packet_frames.clear()
+                res = self._build_status_locked(sess, cfg, cur_time=cur_time)
+                res["frame_score"] = 0.0
+                res["mean_luma"] = round(mean_luma, 1)
+                res["strands_detected"] = 0
+                res["anomaly_tiles"] = 0
+                res["auto_pause_triggered"] = False
+                res["should_pause_ui"] = False
+                res["packet_state"] = "calibrating"
+                return res
+
+            if sess.calibration_left == 0 and sess.ai_state == "calibrating":
+                sess.ai_state = "monitoring"
+
+            # 2. Check frame sharpness & motion blur gating
+            is_sharp, sharpness, motion_diff = is_frame_sharp_and_stable(
+                frame_rgb, sess.prev_gray, sess.sharpness_baseline, cfg.min_sharpness
             )
-            regions = self._update_tracked_regions(sess, raw_regions, cur_time, dt, eff_thr)
+            cur_gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY) if len(frame_rgb.shape) == 3 else frame_rgb
+            sess.prev_gray = cur_gray
+
+            target_size = 1 if force_eval else cfg.packet_size
+
+            # If frame is blurry or in high motion (and not forced single-frame eval), discard it
+            if not is_sharp and not force_eval:
+                sess.discarded_blur_count += 1
+                res = self._build_status_locked(sess, cfg, cur_time=cur_time)
+                res["frame_score"] = round(sess.last_raw_score, 3)
+                res["mean_luma"] = round(float(cur_gray.mean()), 1)
+                res["strands_detected"] = len(sess.last_regions)
+                res["anomaly_tiles"] = 0
+                res["auto_pause_triggered"] = False
+                res["should_pause_ui"] = False
+                res["packet_state"] = "discarded_blur"
+                res["frame_sharpness"] = round(sharpness, 1)
+                res["sharpness_ok"] = False
+                return res
+
+            # Frame is sharp! Update sharpness baseline
+            sess.sharpness_baseline = 0.88 * sess.sharpness_baseline + 0.12 * sharpness
+
+            # Pacing guard: prevent stacking identical sub-millisecond frames
+            time_since_last = cur_time - (sess.packet_frames[-1]["ts"] if sess.packet_frames else 0.0)
+            if time_since_last >= 0.05 or not sess.packet_frames or force_eval or (now is not None):
+                sess.packet_frames.append({
+                    "rgb": frame_rgb.copy(),
+                    "sharpness": sharpness,
+                    "ts": cur_time,
+                    "ctx": ctx,
+                })
+
+            # Check if packet accumulation is still in progress
+            if len(sess.packet_frames) < target_size:
+                res = self._build_status_locked(sess, cfg, cur_time=cur_time)
+                res["frame_score"] = round(sess.last_raw_score, 3)
+                res["mean_luma"] = round(float(cur_gray.mean()), 1)
+                res["strands_detected"] = len(sess.last_regions)
+                res["anomaly_tiles"] = 0
+                res["auto_pause_triggered"] = False
+                res["should_pause_ui"] = False
+                res["packet_state"] = "accumulating"
+                res["frame_sharpness"] = round(sharpness, 1)
+                res["sharpness_ok"] = True
+                return res
+
+            # =========================================================================
+            # 3. FULL PACKET OF SHARP FRAMES (5 FRAMES): RUN DEEP MAJORITY VOTING CONSENSUS!
+            # =========================================================================
+            packet = list(sess.packet_frames[:target_size])
+            sess.packet_frames.clear()
+
+            all_raw_regions: List[Dict[str, Any]] = []
+            frame_scores: List[float] = []
+            total_strands_observed = 0
+
+            for frame_idx, p_item in enumerate(packet):
+                p_rgb = p_item["rgb"]
+                p_ctx = p_item.get("ctx") or ctx
+                f_score, raw_regs, m_luma, strands, a_tiles = self._score_frame_cv(
+                    sess, p_rgb, p_ctx, cur_time, eff_thr=eff_thr
+                )
+                frame_scores.append(f_score)
+                total_strands_observed = max(total_strands_observed, strands)
+                for r in raw_regs:
+                    r_copy = dict(r)
+                    r_copy["frame_idx"] = frame_idx
+                    all_raw_regions.append(r_copy)
+
+            # Spatial Consensus Clustering across the packet frames
+            clusters: List[List[Dict[str, Any]]] = []
+            for cand in all_raw_regions:
+                matched_cl = None
+                for cl in clusters:
+                    for member in cl:
+                        if _box_iou(cand, member) >= 0.16 or _box_proximity(cand, member, dist_thr=0.09):
+                            matched_cl = cl
+                            break
+                    if matched_cl is not None:
+                        break
+                if matched_cl is not None:
+                    matched_cl.append(cand)
+                else:
+                    clusters.append([cand])
+
+            confirmed_candidates: List[Dict[str, Any]] = []
+            majority_votes_req = 1 if force_eval else max(2, min(cfg.packet_size, cfg.majority_votes_required))
+
+            for cl in clusters:
+                voting_frames = set(item["frame_idx"] for item in cl)
+                votes_count = len(voting_frames)
+                is_ignored = any(item.get("ignored") for item in cl)
+                def_id = next((item.get("defect_id") for item in cl if item.get("defect_id")), None)
+
+                # Ignored regions are always preserved for UI HUD.
+                # Active candidates MUST achieve majority voting (e.g. >= 3 out of 5 frames).
+                if is_ignored or votes_count >= majority_votes_req:
+                    avg_x = sum(float(b["x"]) for b in cl) / len(cl)
+                    avg_y = sum(float(b["y"]) for b in cl) / len(cl)
+                    avg_w = sum(float(b["w"]) for b in cl) / len(cl)
+                    avg_h = sum(float(b["h"]) for b in cl) / len(cl)
+                    scores = [float(b["score"]) for b in cl]
+                    cons_score = 0.60 * max(scores) + 0.40 * (sum(scores) / len(scores))
+                    max_strands = max(int(b.get("strands", 1)) for b in cl)
+
+                    confirmed_candidates.append({
+                        "x": round(avg_x, 4),
+                        "y": round(avg_y, 4),
+                        "w": round(avg_w, 4),
+                        "h": round(avg_h, 4),
+                        "score": round(cons_score, 3),
+                        "strands": max_strands,
+                        "ignored": is_ignored,
+                        "defect_id": def_id,
+                        "votes": f"{votes_count}/{target_size}",
+                        "votes_count": votes_count,
+                    })
+
+            # Check unignored active confirmed detections
+            active_confirmed = [r for r in confirmed_candidates if not r.get("ignored")]
+            majority_confirmed = len(active_confirmed) > 0
+
+            if majority_confirmed:
+                max_votes = max(r["votes_count"] for r in active_confirmed)
+                packet_raw_score = max(r["score"] for r in active_confirmed)
+                if len(active_confirmed) >= 2:
+                    packet_raw_score = min(1.0, packet_raw_score + 0.05)
+            else:
+                max_votes = max((r.get("votes_count", 0) for r in confirmed_candidates), default=0)
+                # Reject false positives: if majority of frames didn't detect it, score is 0.0!
+                packet_raw_score = 0.0
+
+            dt_packet = max(0.5, min(3.0, cur_time - sess.last_packet_eval_ts)) if sess.last_packet_eval_ts > 0 else dt
+            sess.last_packet_eval_ts = cur_time
+
+            regions = self._update_tracked_regions(sess, confirmed_candidates, cur_time, dt_packet, eff_thr)
             infer_ms = (time.perf_counter() - t0) * 1000.0
-            sess.frames_analyzed += 1
-            sess.avg_infer_ms = infer_ms if sess.frames_analyzed == 1 else (0.85 * sess.avg_infer_ms + 0.15 * infer_ms)
+            sess.frames_analyzed += len(packet)
+            sess.avg_infer_ms = 0.85 * sess.avg_infer_ms + 0.15 * (infer_ms / max(1, len(packet)))
 
             # Update context gating
             in_prep = bool(
@@ -1456,8 +1856,11 @@ class StringingWatchdog:
             )
             is_active_print = (printer_state == "printing") and (not in_prep)
 
-            sess.last_raw_score = frame_score
+            sess.last_raw_score = packet_raw_score
             sess.last_regions = regions
+            sess.last_packet_votes = max_votes
+            sess.last_packet_confirmed = majority_confirmed
+            sess.last_packet_sharpness = float(np.mean([p["sharpness"] for p in packet]))
 
             auto_pause_triggered = False
             should_pause_ui = False
@@ -1465,32 +1868,34 @@ class StringingWatchdog:
             if sess.paused_by_ai and printer_state == "paused":
                 sess.ai_state = "paused_by_ai"
                 sess.streak_sec = 0.0
-            elif sess.calibration_left > 0 or sess.exposure_skip_left > 0:
-                sess.ai_state = "calibrating"
-                sess.streak_sec = 0.0
-                sess.ema_score = 0.0
             else:
-                sess.ema_score = 0.42 * frame_score + 0.58 * sess.ema_score
-
-                if sess.ema_score >= eff_thr or (frame_score >= eff_thr and sess.ema_score >= eff_thr * 0.85):
-                    sess.streak_sec += dt
-                    sess.ai_state = "warning"
-                elif frame_score >= eff_thr * 0.78:
-                    sess.streak_sec = max(0.0, sess.streak_sec - dt * 0.35)
-                    sess.ai_state = "warning" if sess.streak_sec > 0.4 else "monitoring"
+                if majority_confirmed:
+                    sess.ema_score = 0.45 * packet_raw_score + 0.55 * sess.ema_score
+                    if sess.ema_score >= eff_thr or (packet_raw_score >= eff_thr and sess.ema_score >= eff_thr * 0.85):
+                        sess.streak_sec += dt_packet
+                        sess.ai_state = "warning"
+                    elif packet_raw_score >= eff_thr * 0.78:
+                        sess.streak_sec = max(0.0, sess.streak_sec - dt_packet * 0.35)
+                        sess.ai_state = "warning" if sess.streak_sec > 0.4 else "monitoring"
+                    else:
+                        sess.streak_sec = max(0.0, sess.streak_sec - dt_packet * 2.0)
+                        sess.ai_state = "monitoring"
                 else:
-                    sess.streak_sec = max(0.0, sess.streak_sec - dt * 2.2)
+                    sess.ema_score = 0.65 * sess.ema_score
+                    sess.streak_sec = max(0.0, sess.streak_sec - dt_packet * 2.5)
                     sess.ai_state = "monitoring"
 
-                if regions and frame_score >= max(0.46, eff_thr * 0.75):
+                if regions and packet_raw_score >= max(0.46, eff_thr * 0.75):
+                    # Use the sharpest frame from the packet for evidence snapshot!
+                    best_frame_rgb = max(packet, key=lambda p: p["sharpness"])["rgb"]
                     sess.latest_annotated_jpeg = _render_evidence_jpeg(
-                        frame_rgb, regions, max(frame_score, sess.ema_score), "Rilevamento Stringing"
+                        best_frame_rgb, regions, max(packet_raw_score, sess.ema_score), f"Stringing Confermato ({max_votes}/{target_size})"
                     )
 
                 if sess.streak_sec >= eff_confirm:
-                    # Sustained stringing confirmed!
+                    best_frame_rgb = max(packet, key=lambda p: p["sharpness"])["rgb"]
                     snap = _render_evidence_jpeg(
-                        frame_rgb, regions, max(frame_score, sess.ema_score), "AUTO-PAUSA STRINGING"
+                        best_frame_rgb, regions, max(packet_raw_score, sess.ema_score), f"AUTO-PAUSA STRINGING ({max_votes}/{target_size})"
                     )
                     sess.alert_snapshot_jpeg = snap
                     sess.latest_annotated_jpeg = snap
@@ -1500,20 +1905,20 @@ class StringingWatchdog:
                     sess.alert_info = {
                         "timestamp": cur_time,
                         "time_str": alert_ts,
-                        "score": round(max(frame_score, sess.ema_score), 3),
-                        "confidence_pct": int(round(max(frame_score, sess.ema_score) * 100)),
-                        "strands": total_strands,
+                        "score": round(max(packet_raw_score, sess.ema_score), 3),
+                        "confidence_pct": int(round(max(packet_raw_score, sess.ema_score) * 100)),
+                        "strands": total_strands_observed,
                         "layer": ctx.layer if ctx else None,
                         "feature_label": ctx.feature_label if ctx else "",
                         "regions": list(regions),
                         "paused": False,
-                        "reason": f"Stringing persistente rilevato ({int(round(max(frame_score, sess.ema_score) * 100))}%)",
+                        "votes": f"{max_votes}/{target_size}",
+                        "reason": f"Stringing confermato a maggioranza ({max_votes}/{target_size} frame, {int(round(max(packet_raw_score, sess.ema_score) * 100))}%)",
                     }
 
                     if can_pause and ctx is not None:
                         paused_ok, pause_method = self._trigger_moonraker_pause(sess.ip)
                         if pause_method.startswith("not_printing:"):
-                            # Race guard: printer stopped/finished before frame completed analysis
                             sess.ai_state = "standby"
                             sess.streak_sec = 0.0
                         else:
@@ -1525,7 +1930,6 @@ class StringingWatchdog:
                             auto_pause_triggered = True
                             should_pause_ui = not paused_ok
                     elif can_pause:
-                        # No Moonraker context available: delegate pause execution to UI (:9999)
                         sess.paused_by_ai = True
                         sess.cooldown_until = cur_time + cfg.cooldown_seconds
                         sess.ai_state = "paused_by_ai"
@@ -1537,12 +1941,15 @@ class StringingWatchdog:
                         sess.ai_state = "alert_only"
 
             res = self._build_status_locked(sess, cfg, cur_time=cur_time)
-            res["frame_score"] = round(frame_score, 3)
-            res["mean_luma"] = round(mean_luma, 1)
-            res["strands_detected"] = total_strands
-            res["anomaly_tiles"] = anomaly_tiles
+            res["frame_score"] = round(packet_raw_score, 3)
+            res["mean_luma"] = round(float(cur_gray.mean()), 1)
+            res["strands_detected"] = total_strands_observed
+            res["anomaly_tiles"] = len(confirmed_candidates)
             res["auto_pause_triggered"] = auto_pause_triggered
             res["should_pause_ui"] = should_pause_ui
+            res["packet_state"] = "evaluated"
+            res["frame_sharpness"] = round(sess.last_packet_sharpness, 1)
+            res["sharpness_ok"] = True
             sess.last_result = res
             return res
 

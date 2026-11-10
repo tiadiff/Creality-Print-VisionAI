@@ -167,7 +167,7 @@ class AIServerSupervisor:
         self.proc: Optional[subprocess.Popen] = None
         self.started_at: float = 0.0
         self.active_mode: str = "stopped"
-        self.desired_mode: str = "auto"
+        self.desired_mode: str = "stopped"
         self.last_error: str = ""
         self.last_exit_code: Optional[int] = None
         self._cap_cache: Optional[Tuple[float, Dict[str, Any]]] = None
@@ -512,8 +512,8 @@ class SupervisorSettings:
     """Small persisted preference store (`%LOCALAPPDATA%\\CrealityVisionAI\\supervisor_settings.json`)."""
 
     DEFAULTS: Dict[str, Any] = {
-        "autostart_with_creality": True,
-        "autostart_mode": "auto",
+        "autostart_with_creality": False,
+        "autostart_mode": "stopped",
     }
 
     def __init__(self, path: str = SETTINGS_PATH) -> None:
@@ -945,8 +945,10 @@ def run_lifecycle_daemon(
             server_thread = t
             t.start()
             cfg = pref.snapshot()
-            if cfg.get("autostart_with_creality", True):
-                sup.start(mode=str(cfg.get("autostart_mode") or "auto"))
+            if cfg.get("autostart_with_creality", False):
+                mode = str(cfg.get("autostart_mode") or "stopped")
+                if mode != "stopped":
+                    sup.start(mode=mode)
 
     def on_cp_close():
         nonlocal active_server, server_thread
