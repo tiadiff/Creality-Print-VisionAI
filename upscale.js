@@ -852,6 +852,9 @@
                     const j = await r.json();
                     serverControlOnline = Boolean(j && j.supervisor_online);
                     serverControlStatus = j;
+                    if (!activePrinterIp && j && j.settings && j.settings.printer_ip) {
+                        activePrinterIp = j.settings.printer_ip;
+                    }
                     updateServerControlUI();
                     updateBadge();
                     renderTelemetryCard();
@@ -881,8 +884,12 @@
                         uptime_sec: j2.uptime_sec || 0,
                         has_full_gpu: Boolean(j2.gpu_upscaler),
                         can_stringing_ai: Boolean(j2.stringing_available),
+                        printer_ip: j2.printer_ip || null,
                         last_error: ""
                     };
+                    if (!activePrinterIp && j2 && j2.printer_ip) {
+                        activePrinterIp = j2.printer_ip;
+                    }
                 } else {
                     serverControlStatus = null;
                 }
@@ -2205,7 +2212,13 @@
             activePrinterIp = qsIp;
             return qsIp;
         }
-        return activePrinterIp;
+        if (!activePrinterIp && serverControlStatus && serverControlStatus.settings && serverControlStatus.settings.printer_ip) {
+            activePrinterIp = serverControlStatus.settings.printer_ip;
+        }
+        if (!activePrinterIp && serverControlStatus && serverControlStatus.printer_ip) {
+            activePrinterIp = serverControlStatus.printer_ip;
+        }
+        return activePrinterIp || "192.168.78.54";
     }
 
     function handlePrinterWs9999Message(msg) {

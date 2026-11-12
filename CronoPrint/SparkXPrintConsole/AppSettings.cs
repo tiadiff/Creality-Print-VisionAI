@@ -6,7 +6,7 @@ namespace SparkXPrintConsole
 {
     public class AppSettings
     {
-        public string PrinterIp { get; set; } = "192.168.78.50";
+        public string PrinterIp { get; set; } = "192.168.78.54";
         public int PrinterPort { get; set; } = 7125;
         public double CostPerKg { get; set; } = 20.0;
         public int PollIntervalSeconds { get; set; } = 3;

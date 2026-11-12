@@ -31,6 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from printer_telemetry import DEFAULT_PRINTER_IP, resolve_default_printer_ip, validate_printer_ip
+
 
 ANALYZE_WIDTH = 448
 
@@ -200,7 +202,7 @@ class StringingConfig:
 
 @dataclass
 class PrinterContext:
-    ip: str = "192.168.78.50"
+    ip: str = DEFAULT_PRINTER_IP
     state: str = "unknown"          # "printing" | "paused" | "standby" | "complete" | ...
     activity_code: str = "unknown"  # "feature" | "travel" | "homing" | "heating" | "preparing" | ...
     feature_category: str = ""      # "wall_outer" | "infill" | "support" | "prime" | ...
@@ -619,12 +621,12 @@ class StringingWatchdog:
 
     def __init__(
         self,
-        default_ip: str = "192.168.78.50",
+        default_ip: Optional[str] = None,
         moonraker_port: int = 7125,
         http_post: Optional[Callable[[str, dict, float], Tuple[int, bytes]]] = None,
         http_get: Optional[Callable[[str, float], bytes]] = None,
     ):
-        self.default_ip = default_ip
+        self.default_ip = validate_printer_ip(default_ip)
         self.moonraker_port = moonraker_port
         self.config = StringingConfig()
         self._cfg_lock = threading.Lock()
@@ -1954,12 +1956,13 @@ class StringingWatchdog:
             return res
 
 
-def context_from_telemetry(payload: Optional[Dict[str, Any]], fallback_ip: str = "192.168.78.50") -> Optional[PrinterContext]:
+def context_from_telemetry(payload: Optional[Dict[str, Any]], fallback_ip: Optional[str] = None) -> Optional[PrinterContext]:
     """Convert a `PrinterTelemetryTracker.poll()` dict into a `PrinterContext`."""
     if not payload or not payload.get("ok"):
         return None
+    fip = fallback_ip or resolve_default_printer_ip("192.168.78.54")
     return PrinterContext(
-        ip=str(payload.get("ip") or fallback_ip),
+        ip=str(payload.get("ip") or fip),
         state=str(payload.get("state") or "unknown").lower(),
         activity_code=str(payload.get("activity_code") or "unknown").lower(),
         feature_category=str(payload.get("feature_category") or "").lower(),

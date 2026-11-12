@@ -15,6 +15,7 @@ Never sends printer control or G-code mutation commands.
 from __future__ import annotations
 
 import bisect
+import glob
 import ipaddress
 import json
 import math
@@ -82,9 +83,69 @@ FEATURE_MAP: Dict[str, Tuple[str, str]] = {
 _PARAM_RE = re.compile(r"([XYZIJEFKR])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))", re.IGNORECASE)
 
 
-def validate_printer_ip(raw_ip: Optional[str], default_ip: str = "192.168.78.50") -> str:
+def resolve_default_printer_ip(fallback: str = "192.168.78.54") -> str:
+    """Resolve active printer IP dynamically from env, supervisor settings, Creality configs, or fallback."""
+    # 1. Environment variables
+    env_ip = os.environ.get("CREALITY_PRINTER_IP") or os.environ.get("PRINTER_IP")
+    if env_ip:
+        try:
+            return str(ipaddress.ip_address(env_ip.strip()))
+        except Exception:
+            pass
+
+    # 2. Supervisor settings
+    local_app = os.environ.get("LOCALAPPDATA") or ""
+    if local_app:
+        sup_path = os.path.join(local_app, "CrealityVisionAI", "supervisor_settings.json")
+        try:
+            if os.path.isfile(sup_path):
+                with open(sup_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                sip = d.get("printer_ip")
+                if sip:
+                    return str(ipaddress.ip_address(sip.strip()))
+        except Exception:
+            pass
+
+    # 3. Creality Print deviceInfo.json
+    app_data = os.environ.get("APPDATA") or ""
+    if app_data:
+        pattern = os.path.join(app_data, "Creality", "Creality Print", "*", "deviceInfo.json")
+        for dev_path in sorted(glob.glob(pattern), reverse=True):
+            try:
+                with open(dev_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for grp in data.get("groups", []):
+                    for dev in grp.get("list", []):
+                        addr = dev.get("address")
+                        if addr:
+                            return str(ipaddress.ip_address(addr.strip()))
+            except Exception:
+                pass
+
+    # 4. CrealitySparkXWidget settings.json
+    if app_data:
+        widget_path = os.path.join(app_data, "CrealitySparkXWidget", "settings.json")
+        try:
+            if os.path.isfile(widget_path):
+                with open(widget_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                host = data.get("PrinterHost")
+                if host:
+                    return str(ipaddress.ip_address(host.strip()))
+        except Exception:
+            pass
+
+    return fallback
+
+
+DEFAULT_PRINTER_IP = resolve_default_printer_ip("192.168.78.54")
+
+
+def validate_printer_ip(raw_ip: Optional[str], default_ip: Optional[str] = None) -> str:
     """Validate printer IP address (IPv4/IPv6 literal only, preventing SSRF)."""
-    candidate = (raw_ip or "").strip() or default_ip
+    fallback = default_ip or resolve_default_printer_ip("192.168.78.54")
+    candidate = (raw_ip or "").strip() or fallback
     # Allow optional :port stripping only if pure host wasn't passed? No, reject hostnames/ports for safety.
     addr = ipaddress.ip_address(candidate)
     if addr.is_multicast or addr.is_unspecified:
@@ -665,7 +726,7 @@ class PrinterTelemetryTracker:
 
     def __init__(
         self,
-        default_ip: str = "192.168.78.50",
+        default_ip: Optional[str] = None,
         moonraker_port: int = 7125,
         min_poll_interval: float = 0.18,
         http_get: Optional[Callable[[str, Optional[Dict[str, str]], float], bytes]] = None,
@@ -1229,7 +1290,7 @@ def _send_moonraker_speed(ip: str, speed_percent: int, moonraker_port: int = 712
 def create_standalone_server(
     host: str = "127.0.0.1",
     port: int = 8088,
-    default_ip: str = "192.168.78.50",
+    default_ip: Optional[str] = None,
     tracker: Optional[PrinterTelemetryTracker] = None,
     watchdog: Optional[Any] = None,
 ):
@@ -1238,6 +1299,8 @@ def create_standalone_server(
     so both production CLI execution and unit tests can bind/shutdown cleanly.
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    default_ip = validate_printer_ip(default_ip)
 
     class _ReuseThreadingHTTPServer(ThreadingHTTPServer):
         allow_reuse_address = True
@@ -1437,6 +1500,7 @@ def create_standalone_server(
                             "upscale_enabled": False,
                             "stringing_available": watchdog is not None,
                             "default_ip": default_ip,
+                            "printer_ip": default_ip,
                             "stringing": watchdog.get_status(default_ip) if watchdog is not None else None,
                         }
                     )
@@ -1583,7 +1647,7 @@ def create_standalone_server(
 def run_standalone_server(
     host: str = "127.0.0.1",
     port: int = 8088,
-    default_ip: str = "192.168.78.50",
+    default_ip: Optional[str] = None,
     tracker: Optional[PrinterTelemetryTracker] = None,
     watchdog: Optional[Any] = None,
 ) -> None:

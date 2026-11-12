@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title Generatore Report Stampe 3D - SparkX i7
 echo ============================================================
 echo   Generazione Report Storico Stampe & Consumi SparkX i7
-echo   Stampante IP: 192.168.78.50:7125 (Moonraker)
+echo   Stampante IP: 192.168.78.54:7125 (Moonraker)
 echo ============================================================
 echo.
 python "%~dp0generate_printer_report.py" --open

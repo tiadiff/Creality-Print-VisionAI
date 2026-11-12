@@ -1287,7 +1287,7 @@
 
             <div class="form-group">
                 <label class="form-label">Indirizzo IP Stampante</label>
-                <input type="text" class="form-input" id="cfgIp" value="192.168.78.50">
+                <input type="text" class="form-input" id="cfgIp" value="192.168.78.54">
             </div>
 
             <div class="form-group">
@@ -1317,7 +1317,7 @@
         let currentStatusFilter = 'all';
         let costPerKg = 20.0;
         let selectedJobId = null;
-        let printerIp = "192.168.78.50";
+        let printerIp = "192.168.78.54";
 
         const svgPlaceholder = `<svg class="placeholder-svg" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M16 66h48M20 66V16h40v50M16 32h48" stroke="#2d3340" stroke-width="2" stroke-linecap="round"/>
@@ -1360,7 +1360,7 @@
             if (msg.type === 'init') {
                 allJobs = msg.jobs || [];
                 costPerKg = msg.costPerKg || 20.0;
-                printerIp = msg.printerIp || "192.168.78.50";
+                printerIp = msg.printerIp || "192.168.78.54";
                 document.getElementById('costPerKgInput').value = costPerKg.toFixed(1);
                 document.getElementById('cfgIp').value = printerIp;
                 updateSummaryKpis();

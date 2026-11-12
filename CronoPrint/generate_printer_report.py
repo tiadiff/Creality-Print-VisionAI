@@ -15,7 +15,38 @@ import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
-PRINTER_IP = "192.168.78.50"
+def _resolve_printer_ip(default: str = "192.168.78.54") -> str:
+    env_ip = os.environ.get("CREALITY_PRINTER_IP") or os.environ.get("PRINTER_IP")
+    if env_ip:
+        return env_ip.strip()
+    try:
+        local_app = os.environ.get("LOCALAPPDATA") or ""
+        sup_path = os.path.join(local_app, "CrealityVisionAI", "supervisor_settings.json")
+        if os.path.isfile(sup_path):
+            with open(sup_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if d.get("printer_ip"):
+                return d["printer_ip"].strip()
+    except Exception:
+        pass
+    try:
+        app_data = os.environ.get("APPDATA") or ""
+        import glob
+        pattern = os.path.join(app_data, "Creality", "Creality Print", "*", "deviceInfo.json")
+        for dev_path in sorted(glob.glob(pattern), reverse=True):
+            with open(dev_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for grp in data.get("groups", []):
+                for dev in grp.get("list", []):
+                    addr = dev.get("address")
+                    if addr:
+                        return addr.strip()
+    except Exception:
+        pass
+    return default
+
+
+PRINTER_IP = _resolve_printer_ip("192.168.78.54")
 PRINTER_PORT = 7125
 DEFAULT_COST_PER_KG = 20.0  # Euro / kg
 
@@ -1221,7 +1252,7 @@ def generate_html_report(jobs, output_path="printer_history.html"):
         <header class="console-header">
             <div class="brand-cluster">
                 <span class="brand-name">SPARKX i7 TELEMETRY</span>
-                <span class="conn-pill"><span class="conn-dot"></span>192.168.78.50:7125</span>
+                <span class="conn-pill"><span class="conn-dot"></span>{PRINTER_IP}:{PRINTER_PORT}</span>
             </div>
 
             <!-- Integrated Telemetry Strip -->

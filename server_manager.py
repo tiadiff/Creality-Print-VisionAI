@@ -153,6 +153,7 @@ class AIServerSupervisor:
         ctrl_port: int = CTRL_PORT,
         log_dir: str = DEFAULT_LOG_DIR,
         python_override: Optional[str] = None,
+        settings: Optional[SupervisorSettings] = None,
     ):
         self.repo_dir = os.path.abspath(repo_dir)
         self.ai_host = ai_host
@@ -161,6 +162,7 @@ class AIServerSupervisor:
         self.log_dir = log_dir
         self.log_path = os.path.join(self.log_dir, "ai_server.log")
         self.python_override = python_override
+        self.settings = settings
 
         self._op_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -368,6 +370,15 @@ class AIServerSupervisor:
             os.makedirs(self.log_dir, exist_ok=True)
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            chosen_ip = self.settings.snapshot().get("printer_ip") if self.settings else None
+            if not chosen_ip:
+                try:
+                    from printer_telemetry import resolve_default_printer_ip
+                    chosen_ip = resolve_default_printer_ip("192.168.78.54")
+                except Exception:
+                    chosen_ip = "192.168.78.54"
+            if chosen_ip:
+                env["CREALITY_PRINTER_IP"] = chosen_ip
             creationflags = CREATE_NO_WINDOW if os.name == "nt" else 0
 
             with self._state_lock:
@@ -514,6 +525,7 @@ class SupervisorSettings:
     DEFAULTS: Dict[str, Any] = {
         "autostart_with_creality": False,
         "autostart_mode": "stopped",
+        "printer_ip": "192.168.78.54",
     }
 
     def __init__(self, path: str = SETTINGS_PATH) -> None:
@@ -529,6 +541,12 @@ class SupervisorSettings:
                         self.data[k] = loaded[k]
         except Exception:
             pass
+        if not self.data.get("printer_ip"):
+            try:
+                from printer_telemetry import resolve_default_printer_ip
+                self.data["printer_ip"] = resolve_default_printer_ip("192.168.78.54")
+            except Exception:
+                self.data["printer_ip"] = "192.168.78.54"
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -541,6 +559,14 @@ class SupervisorSettings:
             if "autostart_mode" in patch:
                 m = str(patch["autostart_mode"] or "auto").strip().lower()
                 self.data["autostart_mode"] = m if m in ("auto", "full_gpu", "standalone_cpu") else "auto"
+            if "printer_ip" in patch:
+                raw_ip = str(patch["printer_ip"] or "").strip()
+                if raw_ip:
+                    try:
+                        import ipaddress
+                        self.data["printer_ip"] = str(ipaddress.ip_address(raw_ip))
+                    except Exception:
+                        pass
             try:
                 os.makedirs(os.path.dirname(self.path), exist_ok=True)
                 with open(self.path, "w", encoding="utf-8") as f:
@@ -727,9 +753,11 @@ def create_supervisor_server(
     cronoprint: Optional[CronoPrintLauncher] = None,
     settings: Optional[SupervisorSettings] = None,
 ):
-    sup = supervisor or AIServerSupervisor(ctrl_port=port)
-    crono = cronoprint or CronoPrintLauncher()
     pref = settings or SupervisorSettings()
+    sup = supervisor or AIServerSupervisor(ctrl_port=port, settings=pref)
+    if sup.settings is None:
+        sup.settings = pref
+    crono = cronoprint or CronoPrintLauncher()
 
     class Handler(BaseHTTPRequestHandler):
         def _send_cors(self, origin: Optional[str]) -> None:
@@ -924,9 +952,9 @@ def run_lifecycle_daemon(
     if not cp_lifecycle.acquire_single_instance(SUPERVISOR_MUTEX):
         return
 
-    sup = AIServerSupervisor(repo_dir=repo_dir, ctrl_port=port)
-    crono = CronoPrintLauncher()
     pref = SupervisorSettings()
+    sup = AIServerSupervisor(repo_dir=repo_dir, ctrl_port=port, settings=pref)
+    crono = CronoPrintLauncher()
 
     stop_evt = threading.Event()
     active_server: Optional[ThreadingHTTPServer] = None
@@ -1033,10 +1061,10 @@ def main() -> int:
         run_lifecycle_daemon(host=args.host, port=args.port, repo_dir=REPO_DIR)
         return 0
 
-    sup = AIServerSupervisor(repo_dir=REPO_DIR, ctrl_port=args.port)
+    pref = SupervisorSettings()
+    sup = AIServerSupervisor(repo_dir=REPO_DIR, ctrl_port=args.port, settings=pref)
     sup.inspect_capabilities(refresh=True)
     crono = CronoPrintLauncher()
-    pref = SupervisorSettings()
     srv = create_supervisor_server(
         supervisor=sup, host=args.host, port=args.port, cronoprint=crono, settings=pref
     )

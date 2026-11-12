@@ -31,7 +31,12 @@ import numpy as np
 import onnxruntime as ort
 from aiohttp import web
 
-from printer_telemetry import PrinterTelemetryTracker, validate_printer_ip
+from printer_telemetry import (
+    DEFAULT_PRINTER_IP as TELEMETRY_DEFAULT_IP,
+    PrinterTelemetryTracker,
+    resolve_default_printer_ip,
+    validate_printer_ip,
+)
 from stringing_detector import StringingWatchdog, context_from_telemetry
 
 import cp_lifecycle
@@ -41,8 +46,8 @@ PORT = 8088
 BASE = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = BASE
 MODEL_PATH = os.path.join(BASE, "models", "realesr_animevideo_v3_fused.onnx")
-MOONRAKER_URL = "http://192.168.78.50:7125"
-DEFAULT_PRINTER_IP = urllib.parse.urlparse(MOONRAKER_URL).hostname or "192.168.78.50"
+DEFAULT_PRINTER_IP = resolve_default_printer_ip("192.168.78.54")
+MOONRAKER_URL = f"http://{DEFAULT_PRINTER_IP}:7125"
 WORKERS = 3
 
 session = None
@@ -421,6 +426,7 @@ async def handle_status(request):
             "gpu_upscaler": True,
             "upscale_enabled": bool(ai_config.get("upscale_enabled", True)),
             "stringing_available": True,
+            "printer_ip": active_printer_ip,
             "providers": session.get_providers() if session is not None else [],
             "stats": stats,
             "config": ai_config,

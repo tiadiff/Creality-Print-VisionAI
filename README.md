@@ -343,7 +343,7 @@ When the user adjusts the custom micro-precision print speed slider in the Creal
 * **Speed Override:** Sent only on pointer release and only when the slider value changes:
   ```http
   POST /printer/gcode/script HTTP/1.1
-  Host: 192.168.78.50:7125
+  Host: 192.168.78.54:7125
   Content-Type: application/json
 
   {"script": "M220 S125"}
@@ -574,6 +574,12 @@ Open Creality Print, connect to your 3D printer, and open the **Device** interfa
 ---
 
 ## Release Notes
+
+### Version 1.1.3
+- Implemented automatic dynamic printer IP discovery (`resolve_default_printer_ip`), querying environment variables, supervisor settings, Creality Print configuration (`deviceInfo.json`), and widget settings with fallback to `192.168.78.54`.
+- Updated all backend services (`ai_upscaler_service.py`, `printer_telemetry.py`, `stringing_detector.py`, `server_manager.py`), CronoPrint tools, and injected UI (`upscale.js`) to support dynamic IP propagation and eliminate stale hardcoded connection timeouts.
+- Propagated resolved printer IP directly from supervisor and AI status endpoints into `upscale.js` and child processes.
+- Updated CronoPrint WinForms console (`SparkXPrintConsole`) default settings and compiled Release binaries.
 
 ### Version 1.1.2
 - Configured all AI services (DirectML Real-ESRGAN super-resolution, background supervisor, and stringing watchdog) to default to OFF / dormant state on launch, ensuring zero background CPU/GPU resource consumption during slicer startup.
